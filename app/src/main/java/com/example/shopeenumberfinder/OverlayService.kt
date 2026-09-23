@@ -1,25 +1,34 @@
 package com.example.shopeenumberfinder
 
 import android.app.Service
-import android.content.*
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.IBinder
-import android.view.*
-import android.widget.*
+import android.view.Gravity
+import android.view.View
+import android.view.WindowManager
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
 
 class OverlayService : Service() {
 
     private lateinit var wm: WindowManager
 
     private var panel: View? = null
-    private var marker: View? = null
     private var statusText: TextView? = null
 
-    private val markerWidth = 105
-    private val markerHeight = 135
+    /*
+     * สูงสุด 5 hint พร้อมกัน
+     */
+    private val hints =
+        mutableListOf<TextView>()
 
     private val statusReceiver =
         object : BroadcastReceiver() {
@@ -29,38 +38,43 @@ class OverlayService : Service() {
                 intent: Intent?
             ) {
 
-                if (intent?.action != "NUMBER_FINDER_STATUS") {
+                if (
+                    intent?.action !=
+                    "NUMBER_FINDER_STATUS"
+                ) {
                     return
                 }
 
                 val msg =
-                    intent.getStringExtra("status")
-                        ?: "Unknown"
+                    intent.getStringExtra(
+                        "status"
+                    ) ?: "Unknown"
 
                 statusText?.text =
-                    "Phase 4A\n$msg"
+                    "Phase 4D\n$msg"
 
+                /*
+                 * ถ้าไม่มี preview_count
+                 * หมายถึงเป็น status ธรรมดา
+                 */
                 if (
-                    intent.hasExtra("highlight_x") &&
-                    intent.hasExtra("highlight_y")
+                    !intent.hasExtra(
+                        "preview_count"
+                    )
                 ) {
-
-                    val x =
-                        intent.getIntExtra(
-                            "highlight_x",
-                            -1
-                        )
-
-                    val y =
-                        intent.getIntExtra(
-                            "highlight_y",
-                            -1
-                        )
-
-                    if (x >= 0 && y >= 0) {
-                        moveMarker(x, y)
-                    }
+                    return
                 }
+
+                val count =
+                    intent.getIntExtra(
+                        "preview_count",
+                        0
+                    )
+
+                updateHints(
+                    intent,
+                    count
+                )
             }
         }
 
@@ -68,15 +82,18 @@ class OverlayService : Service() {
         super.onCreate()
 
         wm =
-            getSystemService(WINDOW_SERVICE)
-                    as WindowManager
+            getSystemService(
+                WINDOW_SERVICE
+            ) as WindowManager
 
         val filter =
             IntentFilter(
                 "NUMBER_FINDER_STATUS"
             )
 
-        if (Build.VERSION.SDK_INT >= 33) {
+        if (
+            Build.VERSION.SDK_INT >= 33
+        ) {
 
             registerReceiver(
                 statusReceiver,
@@ -93,27 +110,29 @@ class OverlayService : Service() {
         }
 
         showPanel()
-        createMarker()
+        createHints()
     }
 
-    private fun params(
-        w: Int,
-        h: Int,
+    private fun overlayParams(
+        width: Int,
+        height: Int,
         x: Int,
         y: Int,
         flags: Int
     ): WindowManager.LayoutParams {
 
         return WindowManager.LayoutParams(
-            w,
-            h,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            width,
+            height,
+            WindowManager.LayoutParams
+                .TYPE_APPLICATION_OVERLAY,
             flags,
             PixelFormat.TRANSLUCENT
         ).apply {
 
             gravity =
-                Gravity.TOP or Gravity.START
+                Gravity.TOP or
+                    Gravity.START
 
             this.x = x
             this.y = y
@@ -130,7 +149,7 @@ class OverlayService : Service() {
 
                 setBackgroundColor(
                     Color.argb(
-                        230,
+                        225,
                         30,
                         30,
                         30
@@ -139,9 +158,9 @@ class OverlayService : Service() {
 
                 setPadding(
                     18,
-                    12,
+                    10,
                     18,
-                    12
+                    10
                 )
             }
 
@@ -149,7 +168,7 @@ class OverlayService : Service() {
             TextView(this).apply {
 
                 text =
-                    "Phase 4A\nWaiting for board"
+                    "Phase 4D\nSEARCHING"
 
                 setTextColor(
                     Color.WHITE
@@ -185,92 +204,308 @@ class OverlayService : Service() {
 
         wm.addView(
             box,
-            params(
+            overlayParams(
                 -2,
                 -2,
                 20,
                 100,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                WindowManager.LayoutParams
+                    .FLAG_NOT_FOCUSABLE
             )
         )
     }
 
-    private fun createMarker() {
+    /*
+     * สร้าง hint 5 อันครั้งเดียว
+     * แล้วค่อยย้ายตำแหน่ง
+     */
+    private fun createHints() {
 
-        val border =
-            GradientDrawable().apply {
+        repeat(5) { index ->
 
-                shape =
-                    GradientDrawable.RECTANGLE
+            val hint =
+                TextView(this).apply {
 
-                setColor(
-                    Color.TRANSPARENT
-                )
+                    gravity =
+                        Gravity.CENTER
 
-                setStroke(
-                    8,
-                    Color.rgb(
-                        0,
-                        220,
-                        80
+                    textSize =
+                        if (index == 0) {
+                            20f
+                        } else {
+                            16f
+                        }
+
+                    setTextColor(
+                        Color.WHITE
                     )
+
+                    visibility =
+                        View.GONE
+                }
+
+            hints.add(hint)
+
+            wm.addView(
+                hint,
+                overlayParams(
+                    if (index == 0) 88 else 72,
+                    if (index == 0) 88 else 72,
+                    0,
+                    0,
+                    WindowManager.LayoutParams
+                        .FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams
+                            .FLAG_NOT_TOUCHABLE
                 )
-
-                cornerRadius = 28f
-            }
-
-        val v =
-            View(this).apply {
-
-                background =
-                    border
-
-                visibility =
-                    View.INVISIBLE
-            }
-
-        marker = v
-
-        wm.addView(
-            v,
-            params(
-                markerWidth,
-                markerHeight,
-                0,
-                0,
-                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
             )
-        )
+        }
     }
 
-    private fun moveMarker(
-        centerX: Int,
-        centerY: Int
+    private fun updateHints(
+        intent: Intent,
+        count: Int
     ) {
 
-        val v =
-            marker ?: return
+        for (
+            index in
+            hints.indices
+        ) {
 
-        val lp =
-            v.layoutParams
+            val hint =
+                hints[index]
+
+            if (index >= count) {
+
+                hint.visibility =
+                    View.GONE
+
+                continue
+            }
+
+            val x =
+                intent.getIntExtra(
+                    "preview_${index}_x",
+                    -1
+                )
+
+            val y =
+                intent.getIntExtra(
+                    "preview_${index}_y",
+                    -1
+                )
+
+            val number =
+                intent.getIntExtra(
+                    "preview_${index}_number",
+                    -1
+                )
+
+            if (
+                x < 0 ||
+                y < 0 ||
+                number < 0
+            ) {
+
+                hint.visibility =
+                    View.GONE
+
+                continue
+            }
+
+            /*
+             * ตัวแรกเด่นที่สุด
+             *
+             * 1 = แดง
+             * 2 = เหลือง/ส้ม
+             * 3 = เขียว
+             * 4-5 = ฟ้า/ขาวบาง
+             */
+            val background =
+                makeHintBackground(
+                    index
+                )
+
+            hint.background =
+                background
+
+            hint.text =
+                number.toString()
+
+            hint.textSize =
+                when (index) {
+
+                    0 -> 22f
+                    1 -> 19f
+                    2 -> 18f
+                    else -> 16f
+                }
+
+            hint.visibility =
+                View.VISIBLE
+
+            val size =
+                if (index == 0) {
+                    88
+                } else {
+                    72
+                }
+
+            val lp =
+                hint.layoutParams
                     as WindowManager.LayoutParams
 
-        lp.x =
-            centerX -
-                markerWidth / 2
+            lp.width = size
+            lp.height = size
 
-        lp.y =
-            centerY -
-                markerHeight / 2
+            /*
+             * x,y ที่ CaptureService ส่งมา
+             * คือ center ของ cell
+             */
+            lp.x =
+                x - size / 2
 
-        wm.updateViewLayout(
-            v,
-            lp
-        )
+            lp.y =
+                y - size / 2
 
-        v.visibility =
-            View.VISIBLE
+            wm.updateViewLayout(
+                hint,
+                lp
+            )
+        }
+    }
+
+    private fun makeHintBackground(
+        index: Int
+    ): GradientDrawable {
+
+        return GradientDrawable().apply {
+
+            shape =
+                GradientDrawable.RECTANGLE
+
+            cornerRadius =
+                18f
+
+            when (index) {
+
+                /*
+                 * กดตอนนี้
+                 */
+                0 -> {
+
+                    setColor(
+                        Color.argb(
+                            55,
+                            255,
+                            0,
+                            0
+                        )
+                    )
+
+                    setStroke(
+                        7,
+                        Color.rgb(
+                            255,
+                            40,
+                            40
+                        )
+                    )
+                }
+
+                /*
+                 * ตัวถัดไป
+                 */
+                1 -> {
+
+                    setColor(
+                        Color.argb(
+                            45,
+                            255,
+                            190,
+                            0
+                        )
+                    )
+
+                    setStroke(
+                        6,
+                        Color.rgb(
+                            255,
+                            180,
+                            0
+                        )
+                    )
+                }
+
+                /*
+                 * ตัวที่ 3
+                 */
+                2 -> {
+
+                    setColor(
+                        Color.argb(
+                            40,
+                            0,
+                            220,
+                            90
+                        )
+                    )
+
+                    setStroke(
+                        5,
+                        Color.rgb(
+                            0,
+                            210,
+                            90
+                        )
+                    )
+                }
+
+                /*
+                 * ตัวที่ 4
+                 */
+                3 -> {
+
+                    setColor(
+                        Color.argb(
+                            25,
+                            0,
+                            160,
+                            255
+                        )
+                    )
+
+                    setStroke(
+                        4,
+                        Color.rgb(
+                            0,
+                            160,
+                            255
+                        )
+                    )
+                }
+
+                /*
+                 * ตัวที่ 5
+                 */
+                else -> {
+
+                    setColor(
+                        Color.argb(
+                            20,
+                            255,
+                            255,
+                            255
+                        )
+                    )
+
+                    setStroke(
+                        3,
+                        Color.WHITE
+                    )
+                }
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -282,19 +517,20 @@ class OverlayService : Service() {
         }
 
         panel?.let {
+
             runCatching {
                 wm.removeView(it)
             }
         }
 
-        marker?.let {
+        for (hint in hints) {
+
             runCatching {
-                wm.removeView(it)
+                wm.removeView(hint)
             }
         }
 
-        panel = null
-        marker = null
+        hints.clear()
 
         super.onDestroy()
     }
