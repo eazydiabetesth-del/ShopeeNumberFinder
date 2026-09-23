@@ -34,13 +34,23 @@ class CaptureService : Service() {
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
 
-    private val handler = Handler(Looper.getMainLooper())
+    private val handler =
+        Handler(Looper.getMainLooper())
 
     private var frameCount = 0L
     private var consecutiveGridFrames = 0
 
     private var ocrBusy = false
     private var lastOcrTime = 0L
+
+    /*
+     * เมื่ออ่าน board ครบแล้ว
+     * เก็บ number -> (row,column) ไว้
+     */
+    private val savedBoard =
+        mutableMapOf<Int, Pair<Int, Int>>()
+
+    private var boardLocked = false
 
     private val recognizer =
         TextRecognition.getClient(
@@ -67,8 +77,13 @@ class CaptureService : Service() {
 
     private val projectionCallback =
         object : MediaProjection.Callback() {
+
             override fun onStop() {
-                sendStatus("Projection stopped")
+
+                sendStatus(
+                    "Projection stopped"
+                )
+
                 cleanupCapture()
             }
         }
@@ -77,10 +92,15 @@ class CaptureService : Service() {
         super.onCreate()
 
         val nm =
-            getSystemService(NOTIFICATION_SERVICE)
-                    as NotificationManager
+            getSystemService(
+                NOTIFICATION_SERVICE
+            ) as NotificationManager
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.O
+        ) {
+
             nm.createNotificationChannel(
                 NotificationChannel(
                     channel,
@@ -98,17 +118,35 @@ class CaptureService : Service() {
     ): Int {
 
         val notification =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Notification.Builder(this, channel)
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.O
+            ) {
+
+                Notification.Builder(
+                    this,
+                    channel
+                )
+
             } else {
+
                 Notification.Builder(this)
             }
-                .setContentTitle("Number Finder")
-                .setContentText("Phase 4A highlight")
-                .setSmallIcon(android.R.drawable.ic_menu_view)
+                .setContentTitle(
+                    "Number Finder"
+                )
+                .setContentText(
+                    "Phase 4B follow next number"
+                )
+                .setSmallIcon(
+                    android.R.drawable.ic_menu_view
+                )
                 .build()
 
-        startForeground(1001, notification)
+        startForeground(
+            1001,
+            notification
+        )
 
         try {
 
@@ -119,24 +157,39 @@ class CaptureService : Service() {
                 ) ?: Activity.RESULT_CANCELED
 
             val data =
-                if (Build.VERSION.SDK_INT >= 33) {
+                if (
+                    Build.VERSION.SDK_INT >= 33
+                ) {
+
                     intent?.getParcelableExtra(
                         "data",
                         Intent::class.java
                     )
+
                 } else {
+
                     @Suppress("DEPRECATION")
-                    intent?.getParcelableExtra<Intent>("data")
+                    intent?.getParcelableExtra<Intent>(
+                        "data"
+                    )
                 }
 
-            if (resultCode != Activity.RESULT_OK || data == null) {
-                sendStatus("P4A • ERROR permission")
+            if (
+                resultCode != Activity.RESULT_OK ||
+                data == null
+            ) {
+
+                sendStatus(
+                    "P4B • ERROR permission"
+                )
+
                 return START_NOT_STICKY
             }
 
             val mgr =
-                getSystemService(MEDIA_PROJECTION_SERVICE)
-                        as MediaProjectionManager
+                getSystemService(
+                    MEDIA_PROJECTION_SERVICE
+                ) as MediaProjectionManager
 
             projection =
                 mgr.getMediaProjection(
@@ -154,7 +207,8 @@ class CaptureService : Service() {
         } catch (e: Exception) {
 
             sendStatus(
-                "P4A ERROR: ${e.javaClass.simpleName}"
+                "P4B ERROR: " +
+                    e.javaClass.simpleName
             )
         }
 
@@ -165,16 +219,26 @@ class CaptureService : Service() {
 
         try {
 
-            val metrics = DisplayMetrics()
+            val metrics =
+                DisplayMetrics()
 
             @Suppress("DEPRECATION")
-            (getSystemService(WINDOW_SERVICE) as WindowManager)
+            (
+                getSystemService(
+                    WINDOW_SERVICE
+                ) as WindowManager
+            )
                 .defaultDisplay
                 .getRealMetrics(metrics)
 
-            val width = metrics.widthPixels
-            val height = metrics.heightPixels
-            val density = metrics.densityDpi
+            val width =
+                metrics.widthPixels
+
+            val height =
+                metrics.heightPixels
+
+            val density =
+                metrics.densityDpi
 
             imageReader =
                 ImageReader.newInstance(
@@ -184,120 +248,145 @@ class CaptureService : Service() {
                     2
                 )
 
-            imageReader?.setOnImageAvailableListener(
-                { reader ->
+            imageReader
+                ?.setOnImageAvailableListener(
+                    { reader ->
 
-                    val image =
-                        try {
-                            reader.acquireLatestImage()
-                        } catch (_: Exception) {
-                            null
-                        }
-
-                    if (image != null) {
-
-                        frameCount++
-
-                        if (
-                            frameCount == 1L ||
-                            frameCount % 10L == 0L
-                        ) {
-
+                        val image =
                             try {
 
-                                val plane = image.planes[0]
-                                val buffer = plane.buffer
-                                val pixelStride = plane.pixelStride
-                                val rowStride = plane.rowStride
+                                reader.acquireLatestImage()
 
-                                val rowPadding =
-                                    rowStride -
-                                        pixelStride * width
+                            } catch (
+                                _: Exception
+                            ) {
 
-                                val bitmapWidth =
-                                    width +
-                                        rowPadding / pixelStride
+                                null
+                            }
 
-                                val bitmap =
-                                    Bitmap.createBitmap(
-                                        bitmapWidth,
-                                        height,
-                                        Bitmap.Config.ARGB_8888
-                                    )
+                        if (image != null) {
 
-                                bitmap.copyPixelsFromBuffer(
-                                    buffer
-                                )
+                            frameCount++
 
-                                val gridReady =
-                                    analyzeGrid(
-                                        bitmap,
-                                        width,
-                                        height
-                                    )
+                            if (
+                                frameCount == 1L ||
+                                frameCount % 10L == 0L
+                            ) {
 
-                                if (
-                                    gridReady &&
-                                    !ocrBusy &&
-                                    SystemClock.elapsedRealtime() -
-                                        lastOcrTime >= 700
-                                ) {
+                                try {
 
-                                    lastOcrTime =
-                                        SystemClock.elapsedRealtime()
+                                    val plane =
+                                        image.planes[0]
 
-                                    val copy =
+                                    val buffer =
+                                        plane.buffer
+
+                                    val pixelStride =
+                                        plane.pixelStride
+
+                                    val rowStride =
+                                        plane.rowStride
+
+                                    val rowPadding =
+                                        rowStride -
+                                            pixelStride *
+                                            width
+
+                                    val bitmapWidth =
+                                        width +
+                                            rowPadding /
+                                            pixelStride
+
+                                    val bitmap =
                                         Bitmap.createBitmap(
+                                            bitmapWidth,
+                                            height,
+                                            Bitmap.Config.ARGB_8888
+                                        )
+
+                                    bitmap
+                                        .copyPixelsFromBuffer(
+                                            buffer
+                                        )
+
+                                    val gridReady =
+                                        analyzeGrid(
                                             bitmap,
-                                            0,
-                                            0,
                                             width,
                                             height
                                         )
 
-                                    runOcr(
-                                        copy,
-                                        width,
-                                        height
+                                    if (
+                                        gridReady &&
+                                        !ocrBusy &&
+                                        SystemClock
+                                            .elapsedRealtime() -
+                                            lastOcrTime >= 350
+                                    ) {
+
+                                        lastOcrTime =
+                                            SystemClock
+                                                .elapsedRealtime()
+
+                                        val copy =
+                                            Bitmap.createBitmap(
+                                                bitmap,
+                                                0,
+                                                0,
+                                                width,
+                                                height
+                                            )
+
+                                        runOcr(
+                                            copy,
+                                            width,
+                                            height
+                                        )
+                                    }
+
+                                    bitmap.recycle()
+
+                                } catch (
+                                    e: Exception
+                                ) {
+
+                                    sendStatus(
+                                        "P4B ERROR: " +
+                                            e.javaClass
+                                                .simpleName
                                     )
                                 }
-
-                                bitmap.recycle()
-
-                            } catch (e: Exception) {
-
-                                sendStatus(
-                                    "P4A ERROR: " +
-                                        e.javaClass.simpleName
-                                )
                             }
+
+                            image.close()
                         }
-
-                        image.close()
-                    }
-                },
-                handler
-            )
-
-            virtualDisplay =
-                projection?.createVirtualDisplay(
-                    "NumberFinderCapture",
-                    width,
-                    height,
-                    density,
-                    DisplayManager
-                        .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader?.surface,
-                    null,
+                    },
                     handler
                 )
 
-            sendStatus("P4A • SEARCHING")
+            virtualDisplay =
+                projection
+                    ?.createVirtualDisplay(
+                        "NumberFinderCapture",
+                        width,
+                        height,
+                        density,
+                        DisplayManager
+                            .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        imageReader?.surface,
+                        null,
+                        handler
+                    )
+
+            sendStatus(
+                "P4B • SEARCHING"
+            )
 
         } catch (e: Exception) {
 
             sendStatus(
-                "P4A ERROR: ${e.javaClass.simpleName}"
+                "P4B ERROR: " +
+                    e.javaClass.simpleName
             )
         }
     }
@@ -315,14 +404,16 @@ class CaptureService : Service() {
             for (column in 0 until 5) {
 
                 val centerX =
-                    (width *
-                        columnCenters[column])
-                        .toInt()
+                    (
+                        width *
+                            columnCenters[column]
+                    ).toInt()
 
                 val centerY =
-                    (height *
-                        rowCenters[row])
-                        .toInt()
+                    (
+                        height *
+                            rowCenters[row]
+                    ).toInt()
 
                 if (
                     looksLikeCell(
@@ -333,21 +424,28 @@ class CaptureService : Service() {
                         height
                     )
                 ) {
+
                     validCells++
                 }
             }
         }
 
         if (validCells >= 23) {
+
             consecutiveGridFrames++
+
         } else {
+
             consecutiveGridFrames = 0
         }
 
-        if (consecutiveGridFrames < 3) {
+        if (
+            consecutiveGridFrames < 3
+        ) {
 
             sendStatus(
-                "P4A • SEARCHING • $validCells/25"
+                "P4B • SEARCHING • " +
+                    "$validCells/25"
             )
 
             return false
@@ -374,174 +472,108 @@ class CaptureService : Service() {
             .process(input)
             .addOnSuccessListener { result ->
 
-                val board =
-                    mutableMapOf<
-                        Int,
-                        Pair<Int, Int>
-                    >()
+                /*
+                 * ถ้ายังไม่มี board
+                 * อ่าน 25 ช่องก่อน
+                 */
+                if (!boardLocked) {
 
-                val occupiedCells =
-                    mutableSetOf<
-                        Pair<Int, Int>
-                    >()
+                    val board =
+                        readBoard(
+                            result,
+                            width,
+                            height
+                        )
 
-                for (block in result.textBlocks) {
-
-                    for (line in block.lines) {
-
-                        for (element in line.elements) {
-
-                            val raw =
-                                element.text
-                                    .trim()
-                                    .replace(
-                                        Regex("[^0-9]"),
-                                        ""
-                                    )
-
-                            val number =
-                                raw.toIntOrNull()
-                                    ?: continue
-
-                            if (number !in 1..25) {
-                                continue
-                            }
-
-                            val box =
-                                element.boundingBox
-                                    ?: continue
-
-                            val x =
-                                box.exactCenterX()
-
-                            val y =
-                                box.exactCenterY()
-
-                            var bestRow = -1
-                            var bestColumn = -1
-
-                            var bestDx =
-                                Float.MAX_VALUE
-
-                            var bestDy =
-                                Float.MAX_VALUE
-
-                            for (row in 0 until 5) {
-
-                                val cy =
-                                    height *
-                                        rowCenters[row]
-
-                                val dy =
-                                    abs(y - cy)
-
-                                if (dy < bestDy) {
-                                    bestDy = dy
-                                    bestRow = row
-                                }
-                            }
-
-                            for (column in 0 until 5) {
-
-                                val cx =
-                                    width *
-                                        columnCenters[column]
-
-                                val dx =
-                                    abs(x - cx)
-
-                                if (dx < bestDx) {
-                                    bestDx = dx
-                                    bestColumn = column
-                                }
-                            }
-
-                            if (
-                                bestRow == -1 ||
-                                bestColumn == -1
-                            ) {
-                                continue
-                            }
-
-                            val maxDx =
-                                width * 0.065f
-
-                            val maxDy =
-                                height * 0.045f
-
-                            if (
-                                bestDx > maxDx ||
-                                bestDy > maxDy
-                            ) {
-                                continue
-                            }
-
-                            val cell =
-                                Pair(
-                                    bestRow + 1,
-                                    bestColumn + 1
-                                )
-
-                            if (
-                                number !in board &&
-                                cell !in occupiedCells
-                            ) {
-
-                                board[number] = cell
-
-                                occupiedCells.add(
-                                    cell
-                                )
-                            }
+                    if (
+                        board.size == 25 &&
+                        (1..25).all {
+                            board.containsKey(it)
                         }
+                    ) {
+
+                        savedBoard.clear()
+                        savedBoard.putAll(board)
+
+                        boardLocked = true
+
+                    } else {
+
+                        sendStatus(
+                            "P4B • BOARD " +
+                                "${board.size}/25"
+                        )
+
+                        return@addOnSuccessListener
                     }
                 }
 
-                val complete =
-                    board.size == 25 &&
-                        (1..25).all {
-                            board.containsKey(it)
-                        } &&
-                        occupiedCells.size == 25
-
-                if (complete) {
-
-                    val one =
-                        board[1]!!
-
-                    val oneX =
-                        (
-                            width *
-                                columnCenters[
-                                    one.second - 1
-                                ]
-                        ).toInt()
-
-                    val oneY =
-                        (
-                            height *
-                                rowCenters[
-                                    one.first - 1
-                                ]
-                        ).toInt()
-
-                    sendHighlight(
-                        "READ 25/25 ✓ • HIGHLIGHT 1",
-                        oneX,
-                        oneY
+                /*
+                 * อ่านเลขสีแดงในกล่อง
+                 * "เลขต่อไป"
+                 *
+                 * กล่องอยู่เหนือ board
+                 * ฝั่งขวาของหน้าจอ
+                 */
+                val nextNumber =
+                    readNextNumber(
+                        result,
+                        width,
+                        height
                     )
 
-                } else {
+                if (
+                    nextNumber == null ||
+                    nextNumber !in 1..25
+                ) {
 
                     sendStatus(
-                        "OCR ${board.size}/25"
+                        "P4B • WAIT NEXT"
                     )
+
+                    return@addOnSuccessListener
                 }
+
+                val cell =
+                    savedBoard[nextNumber]
+
+                if (cell == null) {
+
+                    sendStatus(
+                        "P4B • NO CELL " +
+                            nextNumber
+                    )
+
+                    return@addOnSuccessListener
+                }
+
+                val x =
+                    (
+                        width *
+                            columnCenters[
+                                cell.second - 1
+                            ]
+                    ).toInt()
+
+                val y =
+                    (
+                        height *
+                            rowCenters[
+                                cell.first - 1
+                            ]
+                    ).toInt()
+
+                sendHighlight(
+                    "NEXT $nextNumber • " +
+                        "R${cell.first}C${cell.second}",
+                    x,
+                    y
+                )
             }
             .addOnFailureListener { e ->
 
                 sendStatus(
-                    "P4A OCR ERROR: " +
+                    "P4B OCR ERROR: " +
                         e.javaClass.simpleName
                 )
             }
@@ -550,6 +582,218 @@ class CaptureService : Service() {
                 bitmap.recycle()
                 ocrBusy = false
             }
+    }
+
+    private fun readBoard(
+        result: com.google.mlkit.vision.text.Text,
+        width: Int,
+        height: Int
+    ): Map<Int, Pair<Int, Int>> {
+
+        val board =
+            mutableMapOf<
+                Int,
+                Pair<Int, Int>
+            >()
+
+        val occupied =
+            mutableSetOf<
+                Pair<Int, Int>
+            >()
+
+        for (block in result.textBlocks) {
+
+            for (line in block.lines) {
+
+                for (element in line.elements) {
+
+                    val raw =
+                        element.text
+                            .trim()
+                            .replace(
+                                Regex("[^0-9]"),
+                                ""
+                            )
+
+                    val number =
+                        raw.toIntOrNull()
+                            ?: continue
+
+                    if (
+                        number !in 1..25
+                    ) {
+                        continue
+                    }
+
+                    val box =
+                        element.boundingBox
+                            ?: continue
+
+                    val x =
+                        box.exactCenterX()
+
+                    val y =
+                        box.exactCenterY()
+
+                    var bestRow = -1
+                    var bestColumn = -1
+
+                    var bestDx =
+                        Float.MAX_VALUE
+
+                    var bestDy =
+                        Float.MAX_VALUE
+
+                    for (row in 0 until 5) {
+
+                        val cy =
+                            height *
+                                rowCenters[row]
+
+                        val dy =
+                            abs(y - cy)
+
+                        if (dy < bestDy) {
+
+                            bestDy = dy
+                            bestRow = row
+                        }
+                    }
+
+                    for (
+                        column in
+                        0 until 5
+                    ) {
+
+                        val cx =
+                            width *
+                                columnCenters[column]
+
+                        val dx =
+                            abs(x - cx)
+
+                        if (dx < bestDx) {
+
+                            bestDx = dx
+                            bestColumn = column
+                        }
+                    }
+
+                    if (
+                        bestRow == -1 ||
+                        bestColumn == -1
+                    ) {
+                        continue
+                    }
+
+                    if (
+                        bestDx >
+                        width * 0.065f ||
+                        bestDy >
+                        height * 0.045f
+                    ) {
+                        continue
+                    }
+
+                    val cell =
+                        Pair(
+                            bestRow + 1,
+                            bestColumn + 1
+                        )
+
+                    if (
+                        number !in board &&
+                        cell !in occupied
+                    ) {
+
+                        board[number] =
+                            cell
+
+                        occupied.add(
+                            cell
+                        )
+                    }
+                }
+            }
+        }
+
+        return board
+    }
+
+    private fun readNextNumber(
+        result: com.google.mlkit.vision.text.Text,
+        width: Int,
+        height: Int
+    ): Int? {
+
+        /*
+         * จากหน้าจอที่ทดสอบ:
+         *
+         * "เลขต่อไป" อยู่ฝั่งขวา
+         * เหนือตาราง 5x5
+         *
+         * จำกัดพื้นที่ไว้เพื่อไม่ให้
+         * ไปอ่านเลขจาก board
+         */
+        val minX =
+            width * 0.50f
+
+        val maxX =
+            width * 0.98f
+
+        val minY =
+            height * 0.17f
+
+        val maxY =
+            height * 0.28f
+
+        for (block in result.textBlocks) {
+
+            for (line in block.lines) {
+
+                for (element in line.elements) {
+
+                    val box =
+                        element.boundingBox
+                            ?: continue
+
+                    val x =
+                        box.exactCenterX()
+
+                    val y =
+                        box.exactCenterY()
+
+                    if (
+                        x < minX ||
+                        x > maxX ||
+                        y < minY ||
+                        y > maxY
+                    ) {
+                        continue
+                    }
+
+                    val raw =
+                        element.text
+                            .trim()
+                            .replace(
+                                Regex("[^0-9]"),
+                                ""
+                            )
+
+                    val number =
+                        raw.toIntOrNull()
+                            ?: continue
+
+                    if (
+                        number in 1..25
+                    ) {
+                        return number
+                    }
+                }
+            }
+        }
+
+        return null
     }
 
     private fun looksLikeCell(
@@ -563,13 +807,19 @@ class CaptureService : Service() {
         val dx =
             maxOf(
                 6,
-                (width * 0.025f).toInt()
+                (
+                    width *
+                        0.025f
+                ).toInt()
             )
 
         val dy =
             maxOf(
                 6,
-                (height * 0.012f).toInt()
+                (
+                    height *
+                        0.012f
+                ).toInt()
             )
 
         val offsets =
@@ -588,18 +838,22 @@ class CaptureService : Service() {
         for (offset in offsets) {
 
             val x =
-                (centerX + offset[0])
-                    .coerceIn(
-                        0,
-                        bitmap.width - 1
-                    )
+                (
+                    centerX +
+                        offset[0]
+                ).coerceIn(
+                    0,
+                    bitmap.width - 1
+                )
 
             val y =
-                (centerY + offset[1])
-                    .coerceIn(
-                        0,
-                        bitmap.height - 1
-                    )
+                (
+                    centerY +
+                        offset[1]
+                ).coerceIn(
+                    0,
+                    bitmap.height - 1
+                )
 
             val color =
                 bitmap.getPixel(
@@ -619,7 +873,9 @@ class CaptureService : Service() {
             val brightness =
                 (r + g + b) / 3
 
-            if (brightness >= 185) {
+            if (
+                brightness >= 185
+            ) {
                 lightSamples++
             }
 
