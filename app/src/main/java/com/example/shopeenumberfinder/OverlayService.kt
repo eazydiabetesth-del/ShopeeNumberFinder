@@ -12,34 +12,55 @@ import android.widget.*
 class OverlayService : Service() {
 
     private lateinit var wm: WindowManager
+
     private var panel: View? = null
     private var marker: View? = null
-    private var frameText: TextView? = null
+    private var statusText: TextView? = null
 
-    private val frameReceiver = object : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            if (intent?.action == "NUMBER_FINDER_FRAME") {
-                val frames = intent.getLongExtra("frames", 0L)
-                frameText?.text = "Phase 2 • Frames: $frames"
+    private val statusReceiver =
+        object : BroadcastReceiver() {
+
+            override fun onReceive(
+                context: Context?,
+                intent: Intent?
+            ) {
+
+                if (intent?.action == "NUMBER_FINDER_STATUS") {
+
+                    val msg =
+                        intent.getStringExtra("status")
+                            ?: "Unknown"
+
+                    statusText?.text =
+                        "Phase 2C\n$msg"
+                }
             }
         }
-    }
 
     override fun onCreate() {
         super.onCreate()
 
-        wm = getSystemService(WINDOW_SERVICE) as WindowManager
+        wm =
+            getSystemService(WINDOW_SERVICE)
+                    as WindowManager
 
-        val filter = IntentFilter("NUMBER_FINDER_FRAME")
+        val filter =
+            IntentFilter("NUMBER_FINDER_STATUS")
 
         if (Build.VERSION.SDK_INT >= 33) {
+
             registerReceiver(
-                frameReceiver,
+                statusReceiver,
                 filter,
                 Context.RECEIVER_NOT_EXPORTED
             )
+
         } else {
-            registerReceiver(frameReceiver, filter)
+
+            registerReceiver(
+                statusReceiver,
+                filter
+            )
         }
 
         showPanel()
@@ -52,42 +73,78 @@ class OverlayService : Service() {
         x: Int,
         y: Int,
         flags: Int
-    ) = WindowManager.LayoutParams(
-        w,
-        h,
-        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-        flags,
-        PixelFormat.TRANSLUCENT
-    ).apply {
-        gravity = Gravity.TOP or Gravity.START
-        this.x = x
-        this.y = y
-    }
+    ) =
+        WindowManager.LayoutParams(
+            w,
+            h,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            flags,
+            PixelFormat.TRANSLUCENT
+        ).apply {
+
+            gravity =
+                Gravity.TOP or Gravity.START
+
+            this.x = x
+            this.y = y
+        }
 
     private fun showPanel() {
 
-        val box = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setBackgroundColor(Color.argb(220, 30, 30, 30))
-            setPadding(12, 6, 12, 6)
-        }
+        val box =
+            LinearLayout(this).apply {
 
-        frameText = TextView(this).apply {
-            text = "Phase 2 • Waiting..."
-            setTextColor(Color.WHITE)
-            textSize = 14f
-            setPadding(0, 0, 12, 0)
-        }
+                orientation =
+                    LinearLayout.VERTICAL
 
-        box.addView(frameText)
+                setBackgroundColor(
+                    Color.argb(
+                        230,
+                        30,
+                        30,
+                        30
+                    )
+                )
 
-        box.addView(Button(this).apply {
-            text = "STOP"
-            setOnClickListener {
-                stopService(Intent(this@OverlayService, CaptureService::class.java))
-                stopSelf()
+                setPadding(
+                    18,
+                    12,
+                    18,
+                    12
+                )
             }
-        })
+
+        statusText =
+            TextView(this).apply {
+
+                text =
+                    "Phase 2C\nOverlay OK"
+
+                setTextColor(Color.WHITE)
+
+                textSize = 14f
+            }
+
+        box.addView(statusText)
+
+        box.addView(
+            Button(this).apply {
+
+                text = "STOP"
+
+                setOnClickListener {
+
+                    stopService(
+                        Intent(
+                            this@OverlayService,
+                            CaptureService::class.java
+                        )
+                    )
+
+                    stopSelf()
+                }
+            }
+        )
 
         panel = box
 
@@ -105,13 +162,26 @@ class OverlayService : Service() {
 
     private fun showMarker() {
 
-        val v = TextView(this).apply {
-            text = "◎"
-            textSize = 62f
-            gravity = Gravity.CENTER
-            setTextColor(Color.RED)
-            setBackgroundColor(Color.argb(35, 255, 0, 0))
-        }
+        val v =
+            TextView(this).apply {
+
+                text = "◎"
+                textSize = 62f
+
+                gravity =
+                    Gravity.CENTER
+
+                setTextColor(Color.RED)
+
+                setBackgroundColor(
+                    Color.argb(
+                        35,
+                        255,
+                        0,
+                        0
+                    )
+                )
+            }
 
         marker = v
 
@@ -131,19 +201,25 @@ class OverlayService : Service() {
     override fun onDestroy() {
 
         runCatching {
-            unregisterReceiver(frameReceiver)
+            unregisterReceiver(statusReceiver)
         }
 
         panel?.let {
-            runCatching { wm.removeView(it) }
+            runCatching {
+                wm.removeView(it)
+            }
         }
 
         marker?.let {
-            runCatching { wm.removeView(it) }
+            runCatching {
+                wm.removeView(it)
+            }
         }
 
         super.onDestroy()
     }
 
-    override fun onBind(intent: Intent?): IBinder? = null
+    override fun onBind(
+        intent: Intent?
+    ): IBinder? = null
 }
