@@ -16,14 +16,25 @@ import kotlin.math.sqrt
 
 class OverlayService : Service() {
 
-    private lateinit var wm: WindowManager
+    private lateinit var wm:
+        WindowManager
 
-    private var panel: View? = null
-    private var statusText: TextView? = null
+    private var panel:
+        View? = null
 
-    private lateinit var routeView: RouteView
+    private var statusText:
+        TextView? = null
 
-    private val statusReceiver =
+    private lateinit var routeView:
+        RouteView
+
+    private val groupButtons =
+        mutableListOf<Button>()
+
+    private var captureButton:
+        Button? = null
+
+    private val receiver =
         object : BroadcastReceiver() {
 
             override fun onReceive(
@@ -35,54 +46,71 @@ class OverlayService : Service() {
                     intent?.action
                 ) {
 
-                    "NUMBER_FINDER_STATUS" -> {
+                    CaptureService
+                        .ACTION_STATUS -> {
 
                         val msg =
-                            intent.getStringExtra(
-                                "status"
-                            ) ?: return
+                            intent
+                                .getStringExtra(
+                                    "status"
+                                )
+                                ?: return
 
                         statusText?.text =
-                            "Phase 4E\n$msg"
+                            msg
                     }
 
-                    "NUMBER_FINDER_ROUTE" -> {
+                    CaptureService
+                        .ACTION_ROUTE -> {
 
                         val count =
-                            intent.getIntExtra(
-                                "count",
-                                0
-                            )
+                            intent
+                                .getIntExtra(
+                                    "count",
+                                    0
+                                )
+
+                        val group =
+                            intent
+                                .getIntExtra(
+                                    "group",
+                                    0
+                                )
 
                         val points =
-                            mutableListOf<RoutePoint>()
+                            mutableListOf<
+                                RoutePoint
+                            >()
 
                         for (
                             i in 0 until count
                         ) {
 
                             val x =
-                                intent.getIntExtra(
-                                    "x_$i",
-                                    -1
-                                )
+                                intent
+                                    .getIntExtra(
+                                        "x_$i",
+                                        -1
+                                    )
 
                             val y =
-                                intent.getIntExtra(
-                                    "y_$i",
-                                    -1
-                                )
+                                intent
+                                    .getIntExtra(
+                                        "y_$i",
+                                        -1
+                                    )
 
                             val number =
-                                intent.getIntExtra(
-                                    "number_$i",
-                                    -1
-                                )
+                                intent
+                                    .getIntExtra(
+                                        "number_$i",
+                                        -1
+                                    )
 
                             if (
                                 x >= 0 &&
                                 y >= 0 &&
-                                number >= 0
+                                number > 0
                             ) {
 
                                 points.add(
@@ -96,11 +124,18 @@ class OverlayService : Service() {
                         }
 
                         /*
-                         * replace ทั้ง route
-                         * ไม่มีการ append ของเก่า
+                         * Atomic replacement
+                         *
+                         * route เก่าหายทั้งชุด
+                         * แล้ว route ใหม่ขึ้น
                          */
-                        routeView.setRoute(
-                            points
+                        routeView
+                            .setRoute(
+                                points
+                            )
+
+                        highlightGroup(
+                            group
                         )
                     }
                 }
@@ -119,11 +154,13 @@ class OverlayService : Service() {
             IntentFilter().apply {
 
                 addAction(
-                    "NUMBER_FINDER_STATUS"
+                    CaptureService
+                        .ACTION_STATUS
                 )
 
                 addAction(
-                    "NUMBER_FINDER_ROUTE"
+                    CaptureService
+                        .ACTION_ROUTE
                 )
             }
 
@@ -132,7 +169,7 @@ class OverlayService : Service() {
         ) {
 
             registerReceiver(
-                statusReceiver,
+                receiver,
                 filter,
                 Context.RECEIVER_NOT_EXPORTED
             )
@@ -140,14 +177,20 @@ class OverlayService : Service() {
         } else {
 
             registerReceiver(
-                statusReceiver,
+                receiver,
                 filter
             )
         }
 
         createRouteOverlay()
-        showPanel()
+        createControlPanel()
     }
+
+    /*
+     * =====================================================
+     * FULL SCREEN ROUTE CANVAS
+     * =====================================================
+     */
 
     private fun createRouteOverlay() {
 
@@ -162,14 +205,22 @@ class OverlayService : Service() {
                     .MATCH_PARENT,
                 WindowManager.LayoutParams
                     .TYPE_APPLICATION_OVERLAY,
+
+                /*
+                 * สำคัญมาก:
+                 *
+                 * Route overlay รับ touch ไม่ได้
+                 * นิ้วจึงทะลุผ่านลงไป
+                 * กดปุ่มเกมด้านล่างได้
+                 */
                 WindowManager.LayoutParams
                     .FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams
                         .FLAG_NOT_TOUCHABLE or
                     WindowManager.LayoutParams
                         .FLAG_LAYOUT_IN_SCREEN,
-                android.graphics.PixelFormat
-                    .TRANSLUCENT
+
+                PixelFormat.TRANSLUCENT
             )
 
         lp.gravity =
@@ -182,7 +233,13 @@ class OverlayService : Service() {
         )
     }
 
-    private fun showPanel() {
+    /*
+     * =====================================================
+     * CONTROL PANEL
+     * =====================================================
+     */
+
+    private fun createControlPanel() {
 
         val box =
             LinearLayout(this).apply {
@@ -192,18 +249,18 @@ class OverlayService : Service() {
 
                 setBackgroundColor(
                     Color.argb(
-                        220,
-                        25,
-                        25,
-                        25
+                        225,
+                        20,
+                        20,
+                        20
                     )
                 )
 
                 setPadding(
-                    18,
                     10,
-                    18,
-                    10
+                    8,
+                    10,
+                    8
                 )
             }
 
@@ -211,36 +268,206 @@ class OverlayService : Service() {
             TextView(this).apply {
 
                 text =
-                    "Phase 4E\nSEARCHING"
+                    "P5A • กด CAPTURE"
 
                 setTextColor(
                     Color.WHITE
                 )
 
-                textSize = 14f
+                textSize = 12f
+
+                setPadding(
+                    6,
+                    2,
+                    6,
+                    4
+                )
             }
 
         box.addView(
             statusText
         )
 
-        box.addView(
+        /*
+         * CAPTURE
+         */
+        captureButton =
             Button(this).apply {
 
-                text = "STOP"
+                text =
+                    "CAPTURE"
+
+                textSize = 12f
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                setBackgroundColor(
+                    Color.rgb(
+                        190,
+                        25,
+                        35
+                    )
+                )
+
+                setPadding(
+                    8,
+                    0,
+                    8,
+                    0
+                )
+
+                minHeight = 0
+                minimumHeight = 0
 
                 setOnClickListener {
 
-                    stopService(
-                        Intent(
-                            this@OverlayService,
-                            CaptureService::class.java
-                        )
+                    sendCommand(
+                        CaptureService
+                            .CMD_CAPTURE
                     )
-
-                    stopSelf()
                 }
             }
+
+        box.addView(
+            captureButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams
+                    .MATCH_PARENT,
+                70
+            )
+        )
+
+        /*
+         * 1 2 3 4 5
+         */
+        val row =
+            LinearLayout(this).apply {
+
+                orientation =
+                    LinearLayout.HORIZONTAL
+
+                setPadding(
+                    0,
+                    5,
+                    0,
+                    5
+                )
+            }
+
+        for (
+            group in 1..5
+        ) {
+
+            val button =
+                Button(this).apply {
+
+                    text =
+                        group.toString()
+
+                    textSize = 13f
+
+                    setTextColor(
+                        Color.WHITE
+                    )
+
+                    setBackgroundColor(
+                        normalGroupColor()
+                    )
+
+                    setPadding(
+                        0,
+                        0,
+                        0,
+                        0
+                    )
+
+                    minWidth = 0
+                    minimumWidth = 0
+
+                    minHeight = 0
+                    minimumHeight = 0
+
+                    setOnClickListener {
+
+                        sendRouteCommand(
+                            group
+                        )
+                    }
+                }
+
+            groupButtons.add(
+                button
+            )
+
+            row.addView(
+                button,
+                LinearLayout.LayoutParams(
+                    62,
+                    62
+                ).apply {
+
+                    marginEnd = 3
+                }
+            )
+        }
+
+        box.addView(row)
+
+        /*
+         * END
+         *
+         * ไม่ปิด Service
+         * แค่ reset session
+         */
+        val endButton =
+            Button(this).apply {
+
+                text = "END"
+
+                textSize = 11f
+
+                setTextColor(
+                    Color.WHITE
+                )
+
+                setBackgroundColor(
+                    Color.rgb(
+                        75,
+                        75,
+                        75
+                    )
+                )
+
+                setPadding(
+                    5,
+                    0,
+                    5,
+                    0
+                )
+
+                minHeight = 0
+                minimumHeight = 0
+
+                setOnClickListener {
+
+                    sendCommand(
+                        CaptureService
+                            .CMD_END
+                    )
+
+                    highlightGroup(0)
+                }
+            }
+
+        box.addView(
+            endButton,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams
+                    .MATCH_PARENT,
+                58
+            )
         )
 
         panel = box
@@ -255,16 +482,19 @@ class OverlayService : Service() {
                     .TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams
                     .FLAG_NOT_FOCUSABLE,
-                android.graphics.PixelFormat
-                    .TRANSLUCENT
+                PixelFormat.TRANSLUCENT
             )
 
         lp.gravity =
             Gravity.TOP or
                 Gravity.START
 
-        lp.x = 20
-        lp.y = 100
+        /*
+         * panel อยู่ด้านบน
+         * ไม่บัง board
+         */
+        lp.x = 10
+        lp.y = 70
 
         wm.addView(
             box,
@@ -272,17 +502,120 @@ class OverlayService : Service() {
         )
     }
 
+    private fun sendCommand(
+        command: String
+    ) {
+
+        val intent =
+            Intent(
+                CaptureService
+                    .ACTION_COMMAND
+            )
+
+        intent.setPackage(
+            packageName
+        )
+
+        intent.putExtra(
+            "command",
+            command
+        )
+
+        sendBroadcast(intent)
+    }
+
+    private fun sendRouteCommand(
+        group: Int
+    ) {
+
+        val intent =
+            Intent(
+                CaptureService
+                    .ACTION_COMMAND
+            )
+
+        intent.setPackage(
+            packageName
+        )
+
+        intent.putExtra(
+            "command",
+            CaptureService
+                .CMD_ROUTE
+        )
+
+        intent.putExtra(
+            "group",
+            group
+        )
+
+        sendBroadcast(intent)
+    }
+
+    /*
+     * =====================================================
+     * BUTTON HIGHLIGHT
+     * =====================================================
+     */
+
+    private fun highlightGroup(
+        selected: Int
+    ) {
+
+        for (
+            i in groupButtons.indices
+        ) {
+
+            val group =
+                i + 1
+
+            groupButtons[i]
+                .setBackgroundColor(
+                    if (
+                        group == selected
+                    ) {
+
+                        /*
+                         * group ปัจจุบัน:
+                         * ส้มเข้ม
+                         */
+                        Color.rgb(
+                            230,
+                            105,
+                            0
+                        )
+
+                    } else {
+
+                        normalGroupColor()
+                    }
+                )
+        }
+    }
+
+    private fun normalGroupColor():
+        Int {
+
+        return Color.rgb(
+            0,
+            125,
+            70
+        )
+    }
+
     override fun onDestroy() {
 
         runCatching {
+
             unregisterReceiver(
-                statusReceiver
+                receiver
             )
         }
 
         panel?.let {
 
             runCatching {
+
                 wm.removeView(it)
             }
         }
@@ -292,6 +625,7 @@ class OverlayService : Service() {
         ) {
 
             runCatching {
+
                 wm.removeView(
                     routeView
                 )
@@ -307,9 +641,9 @@ class OverlayService : Service() {
 }
 
 /*
- * =====================================================
+ * =========================================================
  * ROUTE DATA
- * =====================================================
+ * =========================================================
  */
 
 data class RoutePoint(
@@ -319,58 +653,67 @@ data class RoutePoint(
 )
 
 /*
- * =====================================================
- * ROUTE CANVAS
- * =====================================================
+ * =========================================================
+ * ROUTE VIEW
+ * =========================================================
  */
 
 class RouteView(
     context: Context
 ) : View(context) {
 
-    /*
-     * route ใหม่ replace ของเก่าทั้งชุด
-     */
     private var points:
         List<RoutePoint> =
         emptyList()
 
     /*
-     * สีเลือกให้ contrast สูงกับ
-     * background ขาว/เทาของเกม
+     * =====================================================
+     * COLORS
+     *
+     * พื้นเกมเป็นขาว/เทาอ่อน
+     * จึงใช้สีเข้ม contrast สูง
+     * =====================================================
      */
-    private val colors =
-        intArrayOf(
-            Color.rgb(
-                235,
-                30,
-                45
-            ),      // RED
 
-            Color.rgb(
-                255,
-                145,
-                0
-            ),      // ORANGE
-
-            Color.rgb(
-                0,
-                155,
-                75
-            ),      // GREEN
-
-            Color.rgb(
-                0,
-                90,
-                220
-            ),      // BLUE
-
-            Color.rgb(
-                145,
-                35,
-                200
-            )       // PURPLE
+    private val startColor =
+        Color.rgb(
+            225,
+            20,
+            35
         )
+
+    private val routeColor =
+        Color.rgb(
+            0,
+            145,
+            70
+        )
+
+    private val lineColor =
+        Color.rgb(
+            25,
+            25,
+            25
+        )
+
+    private val lineOutlineColor =
+        Color.rgb(
+            255,
+            145,
+            0
+        )
+
+    /*
+     * Marker intentionally เล็ก
+     *
+     * เพราะตำแหน่ง marker
+     * คือจุดที่ user จะเอานิ้วแตะ
+     */
+    private val markerRadius =
+        22f
+
+    private val startRadius =
+        27f
 
     private val linePaint =
         Paint(
@@ -380,7 +723,7 @@ class RouteView(
             style =
                 Paint.Style.STROKE
 
-            strokeWidth = 9f
+            strokeWidth = 7f
 
             strokeCap =
                 Paint.Cap.ROUND
@@ -389,17 +732,9 @@ class RouteView(
                 Paint.Join.ROUND
 
             color =
-                Color.rgb(
-                    35,
-                    35,
-                    35
-                )
+                lineColor
         }
 
-    /*
-     * เส้น outline อีกชั้น
-     * ทำให้มองเห็นแม้ผ่านพื้นที่สีเข้ม
-     */
     private val lineOutlinePaint =
         Paint(
             Paint.ANTI_ALIAS_FLAG
@@ -408,7 +743,7 @@ class RouteView(
             style =
                 Paint.Style.STROKE
 
-            strokeWidth = 15f
+            strokeWidth = 12f
 
             strokeCap =
                 Paint.Cap.ROUND
@@ -417,14 +752,19 @@ class RouteView(
                 Paint.Join.ROUND
 
             color =
-                Color.rgb(
-                    255,
-                    190,
-                    0
-                )
+                lineOutlineColor
         }
 
-    private val circlePaint =
+    private val markerPaint =
+        Paint(
+            Paint.ANTI_ALIAS_FLAG
+        ).apply {
+
+            style =
+                Paint.Style.FILL
+        }
+
+    private val markerOutlinePaint =
         Paint(
             Paint.ANTI_ALIAS_FLAG
         ).apply {
@@ -432,29 +772,18 @@ class RouteView(
             style =
                 Paint.Style.STROKE
 
-            strokeWidth = 9f
-        }
-
-    /*
-     * เลขเล็กบน marker
-     * ใช้สีดำเพื่อ contrast
-     */
-    private val textPaint =
-        Paint(
-            Paint.ANTI_ALIAS_FLAG
-        ).apply {
+            strokeWidth = 5f
 
             color =
                 Color.BLACK
-
-            textSize = 28f
-
-            typeface =
-                Typeface.DEFAULT_BOLD
-
-            textAlign =
-                Paint.Align.CENTER
         }
+
+    /*
+     * ไม่เขียนเลขทับ marker
+     *
+     * user ไม่ต้องอ่านเลข
+     * ใช้เส้นเป็นตัวนำสายตา
+     */
 
     fun setRoute(
         newPoints:
@@ -462,10 +791,10 @@ class RouteView(
     ) {
 
         /*
-         * สำคัญ:
-         * replace ไม่ใช่ add
+         * replace ทั้งชุด
+         * ไม่ append
          *
-         * route เก่าจึงหายทันที
+         * route เก่าจึงหาย
          */
         points =
             newPoints.toList()
@@ -477,9 +806,7 @@ class RouteView(
         canvas: Canvas
     ) {
 
-        super.onDraw(
-            canvas
-        )
+        super.onDraw(canvas)
 
         if (
             points.isEmpty()
@@ -488,14 +815,8 @@ class RouteView(
         }
 
         /*
-         * -------------------------------------------------
-         * STEP 1
          * วาดเส้นก่อน
-         *
-         * marker จะถูกวาดทับทีหลัง
-         * -------------------------------------------------
          */
-
         if (
             points.size >= 2
         ) {
@@ -514,12 +835,8 @@ class RouteView(
         }
 
         /*
-         * -------------------------------------------------
-         * STEP 2
-         * วาด marker
-         * -------------------------------------------------
+         * วาด marker ทีหลัง
          */
-
         for (
             i in points.indices
         ) {
@@ -563,11 +880,11 @@ class RouteView(
             dy / distance
 
         /*
-         * ไม่ลากเข้า center ของเลข
-         *
-         * ตัดหัวท้ายออก ~48 px
+         * เส้นเริ่ม/จบตรงขอบ marker
+         * ไม่พาดทับจุดที่จะกด
          */
-        val margin = 48f
+        val margin =
+            31f
 
         val startX =
             from.x +
@@ -586,10 +903,7 @@ class RouteView(
                 uy * margin
 
         /*
-         * สีเหลืองเข้มด้านนอก
-         * + ดำด้านใน
-         *
-         * มองเห็นได้บนพื้นขาว
+         * ส้มเข้มด้านนอก
          */
         canvas.drawLine(
             startX,
@@ -599,6 +913,9 @@ class RouteView(
             lineOutlinePaint
         )
 
+        /*
+         * ดำด้านใน
+         */
         canvas.drawLine(
             startX,
             startY,
@@ -607,9 +924,6 @@ class RouteView(
             linePaint
         )
 
-        /*
-         * หัวลูกศร
-         */
         drawArrowHead(
             canvas,
             startX,
@@ -640,7 +954,7 @@ class RouteView(
             )
 
         val arrowLength =
-            27f
+            22f
 
         val arrowAngle =
             Math.toRadians(
@@ -688,7 +1002,7 @@ class RouteView(
                     ).toFloat()
 
         /*
-         * outline ก่อน
+         * outline
          */
         canvas.drawLine(
             endX,
@@ -707,7 +1021,7 @@ class RouteView(
         )
 
         /*
-         * เส้นดำด้านใน
+         * inner
          */
         canvas.drawLine(
             endX,
@@ -732,94 +1046,48 @@ class RouteView(
         index: Int
     ) {
 
-        val color =
-            colors[
-                index %
-                    colors.size
-            ]
+        val isStart =
+            index == 0
 
-        circlePaint.color =
-            color
-
-        /*
-         * จุดแรกใหญ่กว่า
-         * เพราะคือเป้าหมายปัจจุบัน
-         */
         val radius =
             if (
-                index == 0
+                isStart
             ) {
-                49f
+                startRadius
             } else {
-                42f
+                markerRadius
+            }
+
+        markerPaint.color =
+            if (
+                isStart
+            ) {
+                startColor
+            } else {
+                routeColor
             }
 
         /*
-         * วงกลมไม่มี fill
-         * จึงไม่บังเลขของเกม
+         * Fill marker
+         *
+         * user กดตรงจุดนี้ได้เลย
          */
         canvas.drawCircle(
             point.x,
             point.y,
             radius,
-            circlePaint
+            markerPaint
         )
 
         /*
-         * แสดงลำดับ 1..5
-         *
-         * ไม่แสดงเลขจริงซ้ำ
-         * เพราะเลขจริงอยู่กลางช่องแล้ว
-         *
-         * วางไว้ด้านบนของวง
+         * ขอบดำ
+         * ช่วยให้เห็นชัดบนพื้นขาว
          */
-        val label =
-            (index + 1)
-                .toString()
-
-        /*
-         * background สี marker
-         * เป็นจุดเล็กเหนือวง
-         */
-        val labelY =
-            point.y -
-                radius -
-                17f
-
-        val labelPaint =
-            Paint(
-                Paint.ANTI_ALIAS_FLAG
-            ).apply {
-
-                style =
-                    Paint.Style.FILL
-
-                this.color =
-                    color
-            }
-
         canvas.drawCircle(
             point.x,
-            labelY,
-            20f,
-            labelPaint
-        )
-
-        val fm =
-            textPaint.fontMetrics
-
-        val textY =
-            labelY -
-                (
-                    fm.ascent +
-                        fm.descent
-                    ) / 2f
-
-        canvas.drawText(
-            label,
-            point.x,
-            textY,
-            textPaint
+            point.y,
+            radius,
+            markerOutlinePaint
         )
     }
 }
