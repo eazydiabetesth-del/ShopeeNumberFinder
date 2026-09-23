@@ -20,23 +20,21 @@ import kotlin.math.abs
 class CaptureService : Service() {
 
     companion object {
+
         const val ACTION_STATUS =
             "NUMBER_FINDER_STATUS"
 
-        const val ACTION_ROUTE =
-            "NUMBER_FINDER_ROUTE"
+        const val ACTION_ROUTES_READY =
+            "NUMBER_FINDER_ROUTES_READY"
+
+        const val ACTION_CLEAR =
+            "NUMBER_FINDER_CLEAR"
 
         const val ACTION_COMMAND =
             "NUMBER_FINDER_COMMAND"
 
-        const val CMD_CAPTURE =
-            "CAPTURE"
-
-        const val CMD_ROUTE =
-            "ROUTE"
-
-        const val CMD_END =
-            "END"
+        const val CMD_CAPTURE = "CAPTURE"
+        const val CMD_END = "END"
     }
 
     private val channel = "capture"
@@ -56,34 +54,18 @@ class CaptureService : Service() {
     private var screenWidth = 0
     private var screenHeight = 0
 
-    /*
-     * CAPTURE จะเปิด flag นี้
-     * OCR จะทำงานเฉพาะตอน flag เป็น true
-     */
     private var captureRequested = false
     private var ocrBusy = false
+    private var frameCount = 0L
 
     /*
-     * เก็บตำแหน่ง 1..25
+     * OCR หลาย frame แล้วสะสมจนได้ 1..25 ครบ
      *
-     * number -> screen coordinate
-     */
-    private val board =
-        mutableMapOf<Int, Pair<Int, Int>>()
-
-    /*
-     * OCR หลาย frame แล้วรวมผล
-     * ทำให้ไม่จำเป็นต้องอ่านครบ 25
-     * ใน frame เดียว
+     * number -> (row, column)
      */
     private val captureAccumulator =
         mutableMapOf<Int, Pair<Int, Int>>()
 
-    private var frameCount = 0L
-
-    /*
-     * OCR ระหว่าง CAPTURE เท่านั้น
-     */
     private val ocrEveryFrames = 4L
 
     private val columnCenters =
@@ -113,31 +95,17 @@ class CaptureService : Service() {
             ) {
 
                 if (
-                    intent?.action !=
-                    ACTION_COMMAND
+                    intent?.action != ACTION_COMMAND
                 ) {
                     return
                 }
 
                 when (
-                    intent.getStringExtra(
-                        "command"
-                    )
+                    intent.getStringExtra("command")
                 ) {
 
                     CMD_CAPTURE -> {
                         startManualCapture()
-                    }
-
-                    CMD_ROUTE -> {
-
-                        val group =
-                            intent.getIntExtra(
-                                "group",
-                                1
-                            )
-
-                        showRouteGroup(group)
                     }
 
                     CMD_END -> {
@@ -172,8 +140,7 @@ class CaptureService : Service() {
                 NotificationChannel(
                     channel,
                     "Screen capture",
-                    NotificationManager
-                        .IMPORTANCE_LOW
+                    NotificationManager.IMPORTANCE_LOW
                 )
             )
         }
@@ -183,9 +150,7 @@ class CaptureService : Service() {
                 ACTION_COMMAND
             )
 
-        if (
-            Build.VERSION.SDK_INT >= 33
-        ) {
+        if (Build.VERSION.SDK_INT >= 33) {
 
             registerReceiver(
                 commandReceiver,
@@ -227,11 +192,10 @@ class CaptureService : Service() {
                     "Number Finder"
                 )
                 .setContentText(
-                    "Phase 5A manual route"
+                    "Phase 5B precomputed routes"
                 )
                 .setSmallIcon(
-                    android.R.drawable
-                        .ic_menu_view
+                    android.R.drawable.ic_menu_view
                 )
                 .build()
 
@@ -241,8 +205,8 @@ class CaptureService : Service() {
         )
 
         /*
-         * Service อาจได้รับ command
-         * หลังจาก projection เปิดอยู่แล้ว
+         * Projection เปิดอยู่แล้ว
+         * ไม่ต้องเปิดซ้ำ
          */
         if (projection != null) {
             return START_NOT_STICKY
@@ -269,20 +233,18 @@ class CaptureService : Service() {
                 } else {
 
                     @Suppress("DEPRECATION")
-                    intent
-                        ?.getParcelableExtra<Intent>(
-                            "data"
-                        )
+                    intent?.getParcelableExtra<Intent>(
+                        "data"
+                    )
                 }
 
             if (
-                resultCode !=
-                Activity.RESULT_OK ||
+                resultCode != Activity.RESULT_OK ||
                 data == null
             ) {
 
                 sendStatus(
-                    "P5A • ERROR permission"
+                    "P5B • ERROR permission"
                 )
 
                 return START_NOT_STICKY
@@ -309,7 +271,7 @@ class CaptureService : Service() {
         } catch (e: Exception) {
 
             sendStatus(
-                "P5A ERROR: " +
+                "P5B ERROR: " +
                     e.javaClass.simpleName
             )
         }
@@ -356,12 +318,8 @@ class CaptureService : Service() {
 
                         val image =
                             try {
-
-                                reader
-                                    .acquireLatestImage()
-
+                                reader.acquireLatestImage()
                             } catch (_: Exception) {
-
                                 null
                             }
 
@@ -369,21 +327,11 @@ class CaptureService : Service() {
 
                             frameCount++
 
-                            /*
-                             * สำคัญ:
-                             *
-                             * ถ้าไม่ได้กด CAPTURE
-                             * เราไม่ OCR
-                             */
                             if (
                                 captureRequested &&
                                 !ocrBusy &&
-                                (
-                                    frameCount == 1L ||
-                                    frameCount %
-                                        ocrEveryFrames ==
-                                        0L
-                                )
+                                frameCount %
+                                    ocrEveryFrames == 0L
                             ) {
 
                                 try {
@@ -414,8 +362,7 @@ class CaptureService : Service() {
                                         Bitmap.createBitmap(
                                             bitmapWidth,
                                             screenHeight,
-                                            Bitmap.Config
-                                                .ARGB_8888
+                                            Bitmap.Config.ARGB_8888
                                         )
 
                                     fullBitmap
@@ -436,14 +383,11 @@ class CaptureService : Service() {
 
                                     runOcr(bitmap)
 
-                                } catch (
-                                    e: Exception
-                                ) {
+                                } catch (e: Exception) {
 
                                     sendStatus(
-                                        "P5A OCR ERROR: " +
-                                            e.javaClass
-                                                .simpleName
+                                        "P5B OCR ERROR: " +
+                                            e.javaClass.simpleName
                                     )
                                 }
                             }
@@ -455,27 +399,26 @@ class CaptureService : Service() {
                 )
 
             virtualDisplay =
-                projection
-                    ?.createVirtualDisplay(
-                        "NumberFinderCapture",
-                        screenWidth,
-                        screenHeight,
-                        density,
-                        DisplayManager
-                            .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                        imageReader?.surface,
-                        null,
-                        handler
-                    )
+                projection?.createVirtualDisplay(
+                    "NumberFinderCapture",
+                    screenWidth,
+                    screenHeight,
+                    density,
+                    DisplayManager
+                        .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                    imageReader?.surface,
+                    null,
+                    handler
+                )
 
             sendStatus(
-                "P5A • กด CAPTURE เมื่อบอร์ดพร้อม"
+                "P5B • กด CAPTURE"
             )
 
         } catch (e: Exception) {
 
             sendStatus(
-                "P5A ERROR: " +
+                "P5B ERROR: " +
                     e.javaClass.simpleName
             )
         }
@@ -483,21 +426,19 @@ class CaptureService : Service() {
 
     /*
      * =====================================================
-     * MANUAL CAPTURE
+     * CAPTURE
      * =====================================================
      */
 
     private fun startManualCapture() {
 
         captureRequested = true
-
-        board.clear()
         captureAccumulator.clear()
 
-        sendEmptyRoute()
+        sendClear()
 
         sendStatus(
-            "P5A • CAPTURING 0/25"
+            "P5B • CAPTURING 0/25"
         )
     }
 
@@ -506,6 +447,7 @@ class CaptureService : Service() {
     ) {
 
         if (!captureRequested) {
+
             bitmap.recycle()
             return
         }
@@ -524,47 +466,30 @@ class CaptureService : Service() {
                 val detected =
                     readBoard(result)
 
-                /*
-                 * รวมผลหลาย OCR frame
-                 *
-                 * ถ้า OCR frame แรกเห็น 22 ตัว
-                 * frame ต่อมาเห็นอีก 3 ตัว
-                 * ก็ครบได้
-                 */
                 for (
                     entry in detected
                 ) {
 
-                    val number =
-                        entry.key
-
-                    val position =
-                        entry.value
-
                     if (
-                        number in 1..25
+                        entry.key in 1..25
                     ) {
 
                         captureAccumulator[
-                            number
-                        ] = position
+                            entry.key
+                        ] = entry.value
                     }
                 }
 
                 val count =
-                    captureAccumulator
-                        .keys
-                        .count {
-                            it in 1..25
-                        }
+                    (1..25).count {
+                        captureAccumulator
+                            .containsKey(it)
+                    }
 
                 sendStatus(
-                    "P5A • CAPTURING $count/25"
+                    "P5B • CAPTURING $count/25"
                 )
 
-                /*
-                 * LOCK เฉพาะเมื่อครบจริง 1..25
-                 */
                 val complete =
                     (1..25).all {
                         captureAccumulator
@@ -573,34 +498,28 @@ class CaptureService : Service() {
 
                 if (complete) {
 
-                    board.clear()
-
-                    for (
-                        n in 1..25
-                    ) {
-
-                        board[n] =
-                            captureAccumulator[n]!!
-                    }
-
-                    captureRequested =
-                        false
-
-                    sendStatus(
-                        "P5A • READY ✓ • 25/25 • ROUTE 1–10"
-                    )
+                    /*
+                     * สำคัญ:
+                     *
+                     * หลังจากนี้หยุด OCR
+                     */
+                    captureRequested = false
 
                     /*
-                     * Capture เสร็จ
-                     * แสดง 1-10 ทันที
+                     * คำนวณ route ทั้ง 5 ชุด
+                     * เพียงครั้งเดียว
                      */
-                    showRouteGroup(1)
+                    sendAllRoutes()
+
+                    sendStatus(
+                        "P5B • READY ✓ • 1–10"
+                    )
                 }
             }
             .addOnFailureListener { e ->
 
                 sendStatus(
-                    "P5A OCR ERROR: " +
+                    "P5B OCR ERROR: " +
                         e.javaClass.simpleName
                 )
             }
@@ -613,138 +532,108 @@ class CaptureService : Service() {
 
     /*
      * =====================================================
-     * ROUTE GROUP
-     *
-     * 1 = 1..10
-     * 2 = 11..20
-     * 3 = 21..30
-     * 4 = 31..40
-     * 5 = 41..50
+     * PRECOMPUTE ALL 5 ROUTES
      * =====================================================
      */
 
-    private fun showRouteGroup(
-        group: Int
-    ) {
-
-        if (board.size < 25) {
-
-            sendStatus(
-                "P5A • ยังไม่ได้ CAPTURE 25/25"
-            )
-
-            return
-        }
-
-        val safeGroup =
-            group.coerceIn(
-                1,
-                5
-            )
-
-        val start =
-            when (safeGroup) {
-
-                1 -> 1
-                2 -> 11
-                3 -> 21
-                4 -> 31
-                else -> 41
-            }
-
-        val end =
-            minOf(
-                start + 9,
-                50
-            )
+    private fun sendAllRoutes() {
 
         val intent =
             Intent(
-                ACTION_ROUTE
+                ACTION_ROUTES_READY
             )
 
         intent.setPackage(
             packageName
         )
 
-        var count = 0
+        /*
+         * Marker ขยับขึ้นเล็กน้อย
+         * แต่ยังอยู่ภายในปุ่ม
+         */
+        val markerYOffset =
+            (
+                screenHeight *
+                    0.010f
+            ).toInt()
 
+        /*
+         * group 0 = 1..10
+         * group 1 = 11..20
+         * ...
+         * group 4 = 41..50
+         */
         for (
-            number in start..end
+            group in 0 until 5
         ) {
 
-            /*
-             * 26..50 ใช้ตำแหน่ง
-             * 1..25 เดิม
-             */
-            val baseNumber =
-                if (
-                    number <= 25
-                ) {
+            val start =
+                group * 10 + 1
+
+            for (
+                index in 0 until 10
+            ) {
+
+                val number =
+                    start + index
+
+                /*
+                 * 26..50 ใช้ตำแหน่ง
+                 * ของ 1..25 เดิม
+                 */
+                val baseNumber =
+                    if (
+                        number <= 25
+                    ) {
+                        number
+                    } else {
+                        number - 25
+                    }
+
+                val cell =
+                    captureAccumulator[
+                        baseNumber
+                    ] ?: continue
+
+                val x =
+                    (
+                        screenWidth *
+                            columnCenters[
+                                cell.second - 1
+                            ]
+                    ).toInt()
+
+                val y =
+                    (
+                        screenHeight *
+                            rowCenters[
+                                cell.first - 1
+                            ]
+                    ).toInt() -
+                        markerYOffset
+
+                /*
+                 * ส่งทั้ง 50 จุด
+                 * ครั้งเดียว
+                 */
+                intent.putExtra(
+                    "x_${group}_$index",
+                    x
+                )
+
+                intent.putExtra(
+                    "y_${group}_$index",
+                    y
+                )
+
+                intent.putExtra(
+                    "number_${group}_$index",
                     number
-                } else {
-                    number - 25
-                }
-
-            val position =
-                board[baseNumber]
-                    ?: continue
-
-            /*
-             * Marker อยู่ในปุ่มจริง
-             *
-             * ขยับขึ้นเล็กน้อย
-             * แต่ยังอยู่ด้านในช่อง
-             *
-             * จุดนี้คือจุดที่ user
-             * สามารถแตะตามได้เลย
-             */
-            val markerYOffset =
-                (
-                    screenHeight *
-                        0.010f
-                ).toInt()
-
-            val x =
-                position.first
-
-            val y =
-                position.second -
-                    markerYOffset
-
-            intent.putExtra(
-                "x_$count",
-                x
-            )
-
-            intent.putExtra(
-                "y_$count",
-                y
-            )
-
-            intent.putExtra(
-                "number_$count",
-                number
-            )
-
-            count++
+                )
+            }
         }
 
-        intent.putExtra(
-            "count",
-            count
-        )
-
-        intent.putExtra(
-            "group",
-            safeGroup
-        )
-
         sendBroadcast(intent)
-
-        sendStatus(
-            "P5A • ROUTE $start–$end"
-        )
     }
 
     /*
@@ -758,13 +647,13 @@ class CaptureService : Service() {
             com.google.mlkit.vision.text.Text
     ): Map<Int, Pair<Int, Int>> {
 
-        val detected =
+        val board =
             mutableMapOf<
                 Int,
                 Pair<Int, Int>
             >()
 
-        val occupiedCells =
+        val occupied =
             mutableSetOf<
                 Pair<Int, Int>
             >()
@@ -811,42 +700,15 @@ class CaptureService : Service() {
                             box.exactCenterY()
                         ) ?: continue
 
-                    /*
-                     * ตำแหน่ง marker
-                     * ใช้ CENTER ของ cell
-                     * ไม่ใช้ center OCR glyph
-                     *
-                     * ทำให้ตำแหน่งแตะ
-                     * อยู่กลางปุ่มอย่างสม่ำเสมอ
-                     */
-                    val x =
-                        (
-                            screenWidth *
-                                columnCenters[
-                                    cell.second - 1
-                                ]
-                        ).toInt()
-
-                    val y =
-                        (
-                            screenHeight *
-                                rowCenters[
-                                    cell.first - 1
-                                ]
-                        ).toInt()
-
                     if (
-                        number !in detected &&
-                        cell !in occupiedCells
+                        number !in board &&
+                        cell !in occupied
                     ) {
 
-                        detected[number] =
-                            Pair(
-                                x,
-                                y
-                            )
+                        board[number] =
+                            cell
 
-                        occupiedCells.add(
+                        occupied.add(
                             cell
                         )
                     }
@@ -854,7 +716,7 @@ class CaptureService : Service() {
             }
         }
 
-        return detected
+        return board
     }
 
     private fun nearestCell(
@@ -918,15 +780,11 @@ class CaptureService : Service() {
             return null
         }
 
-        /*
-         * ป้องกัน OCR จาก header
-         * ถูกเอามาเป็นเลขบน board
-         */
         if (
             bestDx >
-            screenWidth * 0.065f ||
+                screenWidth * 0.065f ||
             bestDy >
-            screenHeight * 0.045f
+                screenHeight * 0.045f
         ) {
             return null
         }
@@ -946,36 +804,24 @@ class CaptureService : Service() {
     private fun resetSession() {
 
         captureRequested = false
-
-        board.clear()
         captureAccumulator.clear()
 
-        sendEmptyRoute()
+        sendClear()
 
         sendStatus(
-            "P5A • RESET ✓ • กด CAPTURE เกมใหม่"
+            "P5B • RESET ✓ • กด CAPTURE"
         )
     }
 
-    private fun sendEmptyRoute() {
+    private fun sendClear() {
 
         val intent =
             Intent(
-                ACTION_ROUTE
+                ACTION_CLEAR
             )
 
         intent.setPackage(
             packageName
-        )
-
-        intent.putExtra(
-            "count",
-            0
-        )
-
-        intent.putExtra(
-            "group",
-            0
         )
 
         sendBroadcast(intent)
