@@ -926,4 +926,261 @@ class RouteView(
         List<List<RoutePoint>> =
         emptyList()
 
-    private var visibleGroup
+    private var visibleGroup = 0
+
+    private val red = Color.rgb(220, 25, 40)
+    private val green = Color.rgb(0, 145, 70)
+    private val blue = Color.rgb(0, 85, 210)
+
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 5f
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        color = Color.rgb(55, 55, 55)
+    }
+
+    private val lineOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 9f
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        color = Color.rgb(245, 155, 20)
+    }
+
+    private val markerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.FILL
+    }
+
+    private val markerOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+        color = Color.rgb(20, 20, 20)
+    }
+
+    private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 24f
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+    }
+
+    private val normalRadius = 25f
+    private val firstRadius = 29f
+
+    fun setAllRoutes(routes: List<List<RoutePoint>>) {
+        allRoutes = routes.map { it.toList() }
+        visibleGroup = 0
+        invalidate()
+    }
+
+    fun showGroup(group: Int) {
+        if (allRoutes.isEmpty()) return
+
+        visibleGroup = group.coerceIn(
+            0,
+            allRoutes.lastIndex
+        )
+
+        invalidate()
+    }    fun getCurrentRoute(): List<RoutePoint> {
+        if (
+            allRoutes.isEmpty() ||
+            visibleGroup !in allRoutes.indices
+        ) {
+            return emptyList()
+        }
+
+        return allRoutes[visibleGroup].toList()
+    }
+
+    fun clearRoutes() {
+        allRoutes = emptyList()
+        visibleGroup = 0
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+
+        val points = getCurrentRoute()
+
+        if (points.isEmpty()) return
+
+        for (i in 0 until points.size - 1) {
+            drawConnection(
+                canvas,
+                points[i],
+                points[i + 1]
+            )
+        }
+
+        for (i in points.indices) {
+            drawMarker(
+                canvas,
+                points[i],
+                i
+            )
+        }
+    }
+
+    private fun drawConnection(
+        canvas: Canvas,
+        from: RoutePoint,
+        to: RoutePoint
+    ) {
+        val dx = to.x - from.x
+        val dy = to.y - from.y
+
+        val distance = sqrt(
+            dx * dx + dy * dy
+        )
+
+        if (distance < 1f) return
+
+        val ux = dx / distance
+        val uy = dy / distance
+        val margin = 34f
+
+        val startX = from.x + ux * margin
+        val startY = from.y + uy * margin
+
+        val endX = to.x - ux * margin
+        val endY = to.y - uy * margin
+
+        canvas.drawLine(
+            startX,
+            startY,
+            endX,
+            endY,
+            lineOutlinePaint
+        )
+
+        canvas.drawLine(
+            startX,
+            startY,
+            endX,
+            endY,
+            linePaint
+        )
+
+        drawArrowHead(
+            canvas,
+            startX,
+            startY,
+            endX,
+            endY
+        )
+    }    private fun drawArrowHead(
+        canvas: Canvas,
+        startX: Float,
+        startY: Float,
+        endX: Float,
+        endY: Float
+    ) {
+        val angle = atan2(
+            (endY - startY).toDouble(),
+            (endX - startX).toDouble()
+        )
+
+        val arrowLength = 18f
+        val arrowAngle = Math.toRadians(27.0)
+
+        val x1 = endX - (
+            arrowLength *
+                cos(angle - arrowAngle)
+            ).toFloat()
+
+        val y1 = endY - (
+            arrowLength *
+                sin(angle - arrowAngle)
+            ).toFloat()
+
+        val x2 = endX - (
+            arrowLength *
+                cos(angle + arrowAngle)
+            ).toFloat()
+
+        val y2 = endY - (
+            arrowLength *
+                sin(angle + arrowAngle)
+            ).toFloat()
+
+        canvas.drawLine(
+            endX,
+            endY,
+            x1,
+            y1,
+            lineOutlinePaint
+        )
+
+        canvas.drawLine(
+            endX,
+            endY,
+            x2,
+            y2,
+            lineOutlinePaint
+        )
+
+        canvas.drawLine(
+            endX,
+            endY,
+            x1,
+            y1,
+            linePaint
+        )
+
+        canvas.drawLine(
+            endX,
+            endY,
+            x2,
+            y2,
+            linePaint
+        )
+    }
+        private fun drawMarker(
+        canvas: Canvas,
+        point: RoutePoint,
+        index: Int
+    ) {
+        val markerColor = when {
+            index == 0 -> red
+            index % 2 == 1 -> green
+            else -> blue
+        }
+
+        val radius = if (index == 0) {
+            firstRadius
+        } else {
+            normalRadius
+        }
+
+        markerPaint.color = markerColor
+
+        canvas.drawCircle(
+            point.x,
+            point.y,
+            radius,
+            markerPaint
+        )
+
+        canvas.drawCircle(
+            point.x,
+            point.y,
+            radius,
+            markerOutlinePaint
+        )
+
+        val fm = textPaint.fontMetrics
+
+        val textY = point.y -
+            (fm.ascent + fm.descent) / 2f
+
+        canvas.drawText(
+            point.number.toString(),
+            point.x,
+            textY,
+            textPaint
+        )
+    }
+}
