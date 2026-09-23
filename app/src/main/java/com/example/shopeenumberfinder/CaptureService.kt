@@ -1,9 +1,8 @@
 package com.example.shopeenumberfinder
 
 import android.app.*
-import android.content.Intent
+import android.content.*
 import android.graphics.Bitmap
-import android.graphics.Color
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -20,49 +19,72 @@ import kotlin.math.abs
 
 class CaptureService : Service() {
 
+    companion object {
+        const val ACTION_STATUS =
+            "NUMBER_FINDER_STATUS"
+
+        const val ACTION_ROUTE =
+            "NUMBER_FINDER_ROUTE"
+
+        const val ACTION_COMMAND =
+            "NUMBER_FINDER_COMMAND"
+
+        const val CMD_CAPTURE =
+            "CAPTURE"
+
+        const val CMD_ROUTE =
+            "ROUTE"
+
+        const val CMD_END =
+            "END"
+    }
+
     private val channel = "capture"
 
     private var projection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
 
-    private val handler = Handler(Looper.getMainLooper())
-
-    private var frameCount = 0L
-    private var consecutiveGridFrames = 0
-
-    private var ocrBusy = false
-
-    /*
-     * number -> (row,column)
-     *
-     * map นี้จะมีทั้ง 1-25 และเมื่อเกมเปลี่ยน
-     * ก็จะค่อย ๆ กลายเป็น 26-50
-     */
-    private val currentBoard =
-        mutableMapOf<Int, Pair<Int, Int>>()
-
-    /*
-     * OCR ล่าสุดที่ยืนยันแล้วว่า next คืออะไร
-     */
-    private var currentTarget = 1
-
-    /*
-     * ใช้ป้องกัน route กระพริบจาก OCR frame เดียว
-     */
-    private var candidateTarget = -1
-    private var candidateCount = 0
-
-    /*
-     * OCR ทุกประมาณ 6 captured frames
-     * ไม่ต้องรอ pixel detector แบบ 4D
-     */
-    private val ocrEveryFrames = 6L
+    private val handler =
+        Handler(Looper.getMainLooper())
 
     private val recognizer =
         TextRecognition.getClient(
             TextRecognizerOptions.DEFAULT_OPTIONS
         )
+
+    private var screenWidth = 0
+    private var screenHeight = 0
+
+    /*
+     * CAPTURE จะเปิด flag นี้
+     * OCR จะทำงานเฉพาะตอน flag เป็น true
+     */
+    private var captureRequested = false
+    private var ocrBusy = false
+
+    /*
+     * เก็บตำแหน่ง 1..25
+     *
+     * number -> screen coordinate
+     */
+    private val board =
+        mutableMapOf<Int, Pair<Int, Int>>()
+
+    /*
+     * OCR หลาย frame แล้วรวมผล
+     * ทำให้ไม่จำเป็นต้องอ่านครบ 25
+     * ใน frame เดียว
+     */
+    private val captureAccumulator =
+        mutableMapOf<Int, Pair<Int, Int>>()
+
+    private var frameCount = 0L
+
+    /*
+     * OCR ระหว่าง CAPTURE เท่านั้น
+     */
+    private val ocrEveryFrames = 4L
 
     private val columnCenters =
         floatArrayOf(
@@ -82,8 +104,52 @@ class CaptureService : Service() {
             0.82f
         )
 
+    private val commandReceiver =
+        object : BroadcastReceiver() {
+
+            override fun onReceive(
+                context: Context?,
+                intent: Intent?
+            ) {
+
+                if (
+                    intent?.action !=
+                    ACTION_COMMAND
+                ) {
+                    return
+                }
+
+                when (
+                    intent.getStringExtra(
+                        "command"
+                    )
+                ) {
+
+                    CMD_CAPTURE -> {
+                        startManualCapture()
+                    }
+
+                    CMD_ROUTE -> {
+
+                        val group =
+                            intent.getIntExtra(
+                                "group",
+                                1
+                            )
+
+                        showRouteGroup(group)
+                    }
+
+                    CMD_END -> {
+                        resetSession()
+                    }
+                }
+            }
+        }
+
     private val projectionCallback =
         object : MediaProjection.Callback() {
+
             override fun onStop() {
                 cleanupCapture()
             }
@@ -101,12 +167,37 @@ class CaptureService : Service() {
             Build.VERSION.SDK_INT >=
             Build.VERSION_CODES.O
         ) {
+
             nm.createNotificationChannel(
                 NotificationChannel(
                     channel,
                     "Screen capture",
-                    NotificationManager.IMPORTANCE_LOW
+                    NotificationManager
+                        .IMPORTANCE_LOW
                 )
+            )
+        }
+
+        val filter =
+            IntentFilter(
+                ACTION_COMMAND
+            )
+
+        if (
+            Build.VERSION.SDK_INT >= 33
+        ) {
+
+            registerReceiver(
+                commandReceiver,
+                filter,
+                Context.RECEIVER_NOT_EXPORTED
+            )
+
+        } else {
+
+            registerReceiver(
+                commandReceiver,
+                filter
             )
         }
     }
@@ -122,19 +213,25 @@ class CaptureService : Service() {
                 Build.VERSION.SDK_INT >=
                 Build.VERSION_CODES.O
             ) {
+
                 Notification.Builder(
                     this,
                     channel
                 )
+
             } else {
+
                 Notification.Builder(this)
             }
-                .setContentTitle("Number Finder")
+                .setContentTitle(
+                    "Number Finder"
+                )
                 .setContentText(
-                    "Phase 4E rolling route"
+                    "Phase 5A manual route"
                 )
                 .setSmallIcon(
-                    android.R.drawable.ic_menu_view
+                    android.R.drawable
+                        .ic_menu_view
                 )
                 .build()
 
@@ -142,6 +239,14 @@ class CaptureService : Service() {
             1001,
             notification
         )
+
+        /*
+         * Service อาจได้รับ command
+         * หลังจาก projection เปิดอยู่แล้ว
+         */
+        if (projection != null) {
+            return START_NOT_STICKY
+        }
 
         try {
 
@@ -152,25 +257,34 @@ class CaptureService : Service() {
                 ) ?: Activity.RESULT_CANCELED
 
             val data =
-                if (Build.VERSION.SDK_INT >= 33) {
+                if (
+                    Build.VERSION.SDK_INT >= 33
+                ) {
+
                     intent?.getParcelableExtra(
                         "data",
                         Intent::class.java
                     )
+
                 } else {
+
                     @Suppress("DEPRECATION")
-                    intent?.getParcelableExtra<Intent>(
-                        "data"
-                    )
+                    intent
+                        ?.getParcelableExtra<Intent>(
+                            "data"
+                        )
                 }
 
             if (
-                resultCode != Activity.RESULT_OK ||
+                resultCode !=
+                Activity.RESULT_OK ||
                 data == null
             ) {
+
                 sendStatus(
-                    "P4E • ERROR permission"
+                    "P5A • ERROR permission"
                 )
+
                 return START_NOT_STICKY
             }
 
@@ -195,7 +309,7 @@ class CaptureService : Service() {
         } catch (e: Exception) {
 
             sendStatus(
-                "P4E ERROR: " +
+                "P5A ERROR: " +
                     e.javaClass.simpleName
             )
         }
@@ -207,7 +321,8 @@ class CaptureService : Service() {
 
         try {
 
-            val metrics = DisplayMetrics()
+            val metrics =
+                DisplayMetrics()
 
             @Suppress("DEPRECATION")
             (
@@ -218,14 +333,19 @@ class CaptureService : Service() {
                 .defaultDisplay
                 .getRealMetrics(metrics)
 
-            val width = metrics.widthPixels
-            val height = metrics.heightPixels
-            val density = metrics.densityDpi
+            screenWidth =
+                metrics.widthPixels
+
+            screenHeight =
+                metrics.heightPixels
+
+            val density =
+                metrics.densityDpi
 
             imageReader =
                 ImageReader.newInstance(
-                    width,
-                    height,
+                    screenWidth,
+                    screenHeight,
                     PixelFormat.RGBA_8888,
                     2
                 )
@@ -236,8 +356,12 @@ class CaptureService : Service() {
 
                         val image =
                             try {
-                                reader.acquireLatestImage()
+
+                                reader
+                                    .acquireLatestImage()
+
                             } catch (_: Exception) {
+
                                 null
                             }
 
@@ -246,12 +370,20 @@ class CaptureService : Service() {
                             frameCount++
 
                             /*
-                             * OCR ไม่ต้องทำทุก frame
+                             * สำคัญ:
+                             *
+                             * ถ้าไม่ได้กด CAPTURE
+                             * เราไม่ OCR
                              */
                             if (
-                                frameCount == 1L ||
-                                frameCount %
-                                    ocrEveryFrames == 0L
+                                captureRequested &&
+                                !ocrBusy &&
+                                (
+                                    frameCount == 1L ||
+                                    frameCount %
+                                        ocrEveryFrames ==
+                                        0L
+                                )
                             ) {
 
                                 try {
@@ -270,59 +402,48 @@ class CaptureService : Service() {
 
                                     val rowPadding =
                                         rowStride -
-                                            pixelStride * width
+                                            pixelStride *
+                                            screenWidth
 
                                     val bitmapWidth =
-                                        width +
+                                        screenWidth +
                                             rowPadding /
                                             pixelStride
 
-                                    val bitmap =
+                                    val fullBitmap =
                                         Bitmap.createBitmap(
                                             bitmapWidth,
-                                            height,
-                                            Bitmap.Config.ARGB_8888
+                                            screenHeight,
+                                            Bitmap.Config
+                                                .ARGB_8888
                                         )
 
-                                    bitmap.copyPixelsFromBuffer(
-                                        buffer
-                                    )
-
-                                    val gridReady =
-                                        analyzeGrid(
-                                            bitmap,
-                                            width,
-                                            height
+                                    fullBitmap
+                                        .copyPixelsFromBuffer(
+                                            buffer
                                         )
 
-                                    if (
-                                        gridReady &&
-                                        !ocrBusy
-                                    ) {
-
-                                        val copy =
-                                            Bitmap.createBitmap(
-                                                bitmap,
-                                                0,
-                                                0,
-                                                width,
-                                                height
-                                            )
-
-                                        analyzeBoardOcr(
-                                            copy,
-                                            width,
-                                            height
+                                    val bitmap =
+                                        Bitmap.createBitmap(
+                                            fullBitmap,
+                                            0,
+                                            0,
+                                            screenWidth,
+                                            screenHeight
                                         )
-                                    }
 
-                                    bitmap.recycle()
+                                    fullBitmap.recycle()
 
-                                } catch (e: Exception) {
+                                    runOcr(bitmap)
+
+                                } catch (
+                                    e: Exception
+                                ) {
 
                                     sendStatus(
-                                        "P4E ERROR: " +
-                                            e.javaClass.simpleName
+                                        "P5A OCR ERROR: " +
+                                            e.javaClass
+                                                .simpleName
                                     )
                                 }
                             }
@@ -334,36 +455,60 @@ class CaptureService : Service() {
                 )
 
             virtualDisplay =
-                projection?.createVirtualDisplay(
-                    "NumberFinderCapture",
-                    width,
-                    height,
-                    density,
-                    DisplayManager
-                        .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                    imageReader?.surface,
-                    null,
-                    handler
-                )
+                projection
+                    ?.createVirtualDisplay(
+                        "NumberFinderCapture",
+                        screenWidth,
+                        screenHeight,
+                        density,
+                        DisplayManager
+                            .VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                        imageReader?.surface,
+                        null,
+                        handler
+                    )
 
             sendStatus(
-                "P4E • SEARCHING"
+                "P5A • กด CAPTURE เมื่อบอร์ดพร้อม"
             )
 
         } catch (e: Exception) {
 
             sendStatus(
-                "P4E ERROR: " +
+                "P5A ERROR: " +
                     e.javaClass.simpleName
             )
         }
     }
 
-    private fun analyzeBoardOcr(
-        bitmap: Bitmap,
-        width: Int,
-        height: Int
+    /*
+     * =====================================================
+     * MANUAL CAPTURE
+     * =====================================================
+     */
+
+    private fun startManualCapture() {
+
+        captureRequested = true
+
+        board.clear()
+        captureAccumulator.clear()
+
+        sendEmptyRoute()
+
+        sendStatus(
+            "P5A • CAPTURING 0/25"
+        )
+    }
+
+    private fun runOcr(
+        bitmap: Bitmap
     ) {
+
+        if (!captureRequested) {
+            bitmap.recycle()
+            return
+        }
 
         ocrBusy = true
 
@@ -377,93 +522,85 @@ class CaptureService : Service() {
             .addOnSuccessListener { result ->
 
                 val detected =
-                    readBoard(
-                        result,
-                        width,
-                        height
-                    )
+                    readBoard(result)
 
                 /*
-                 * ต้องเห็นจำนวนช่องมากพอ
-                 * ถึงจะยอมใช้ frame นี้
+                 * รวมผลหลาย OCR frame
+                 *
+                 * ถ้า OCR frame แรกเห็น 22 ตัว
+                 * frame ต่อมาเห็นอีก 3 ตัว
+                 * ก็ครบได้
                  */
-                if (detected.size >= 20) {
+                for (
+                    entry in detected
+                ) {
 
-                    /*
-                     * update map ด้วยเลขที่ OCR เห็น
-                     *
-                     * ก่อนใส่เลขใหม่ใน cell เดียวกัน
-                     * ลบเลขเก่าที่เคยอยู่ cell นั้นก่อน
-                     */
-                    for (
-                        entry in detected
-                    ) {
+                    val number =
+                        entry.key
 
-                        val number =
-                            entry.key
-
-                        val cell =
-                            entry.value
-
-                        val oldNumbers =
-                            currentBoard
-                                .filterValues {
-                                    it == cell
-                                }
-                                .keys
-                                .toList()
-
-                        for (
-                            old in oldNumbers
-                        ) {
-                            currentBoard.remove(old)
-                        }
-
-                        currentBoard[number] =
-                            cell
-                    }
-
-                    /*
-                     * หาเลขที่เกมกำลังต้องการ
-                     *
-                     * รอบแรก:
-                     * ถ้า 1 หาย แต่ 2 ยังอยู่ -> next 2
-                     *
-                     * ทำแบบเดียวกันไปจน 25
-                     *
-                     * หลัง 25 จะเริ่มหา 26..50
-                     */
-                    val inferred =
-                        inferTarget(
-                            detected
-                        )
+                    val position =
+                        entry.value
 
                     if (
-                        inferred != null
+                        number in 1..25
                     ) {
 
-                        confirmTarget(
-                            inferred,
-                            width,
-                            height
-                        )
+                        captureAccumulator[
+                            number
+                        ] = position
+                    }
+                }
+
+                val count =
+                    captureAccumulator
+                        .keys
+                        .count {
+                            it in 1..25
+                        }
+
+                sendStatus(
+                    "P5A • CAPTURING $count/25"
+                )
+
+                /*
+                 * LOCK เฉพาะเมื่อครบจริง 1..25
+                 */
+                val complete =
+                    (1..25).all {
+                        captureAccumulator
+                            .containsKey(it)
                     }
 
-                    /*
-                     * ถ้ายังอยู่ target เดิม
-                     * แต่ map มีข้อมูลใหม่
-                     * ก็ redraw ได้
-                     */
-                    sendRoute(
-                        width,
-                        height
+                if (complete) {
+
+                    board.clear()
+
+                    for (
+                        n in 1..25
+                    ) {
+
+                        board[n] =
+                            captureAccumulator[n]!!
+                    }
+
+                    captureRequested =
+                        false
+
+                    sendStatus(
+                        "P5A • READY ✓ • 25/25 • ROUTE 1–10"
                     )
+
+                    /*
+                     * Capture เสร็จ
+                     * แสดง 1-10 ทันที
+                     */
+                    showRouteGroup(1)
                 }
             }
             .addOnFailureListener { e ->
 
                 sendStatus(
-                    "P4E OCR ERROR: " +
+                    "P5A OCR ERROR: " +
                         e.javaClass.simpleName
                 )
             }
@@ -474,125 +611,56 @@ class CaptureService : Service() {
             }
     }
 
-    private fun inferTarget(
-        detected:
-            Map<Int, Pair<Int, Int>>
-    ): Int? {
-
-        /*
-         * เกมเปลี่ยน N -> N+25
-         *
-         * ตัวอย่าง:
-         * 1 ถูกกดแล้ว จะเห็น 26
-         * แต่ไม่เห็น 1
-         *
-         * ดังนั้นหาเลขต่ำสุดใน 1..25
-         * ที่ยังปรากฏอยู่
-         */
-
-        for (
-            n in currentTarget..25
-        ) {
-
-            if (
-                detected.containsKey(n)
-            ) {
-                return n
-            }
-        }
-
-        /*
-         * เมื่อ 1..25 หมดแล้ว
-         * เริ่มรอบ 26..50
-         */
-        if (currentTarget >= 25) {
-
-            for (n in 26..50) {
-
-                if (
-                    detected.containsKey(n)
-                ) {
-                    return n
-                }
-            }
-        }
-
-        return null
-    }
-
-    private fun confirmTarget(
-        target: Int,
-        width: Int,
-        height: Int
-    ) {
-
-        /*
-         * ห้ามถอยหลัง
-         */
-        if (
-            target < currentTarget
-        ) {
-            return
-        }
-
-        if (
-            target ==
-            currentTarget
-        ) {
-
-            candidateTarget = -1
-            candidateCount = 0
-
-            return
-        }
-
-        if (
-            candidateTarget ==
-            target
-        ) {
-
-            candidateCount++
-
-        } else {
-
-            candidateTarget =
-                target
-
-            candidateCount = 1
-        }
-
-        /*
-         * ต้องเห็นตรงกัน 2 OCR
-         * ติดต่อกันก่อนเปลี่ยน route
-         */
-        if (
-            candidateCount >= 2
-        ) {
-
-            currentTarget =
-                target
-
-            candidateTarget = -1
-            candidateCount = 0
-
-            sendRoute(
-                width,
-                height
-            )
-        }
-    }
-
     /*
-     * ส่ง route สูงสุด 5 จุด
+     * =====================================================
+     * ROUTE GROUP
+     *
+     * 1 = 1..10
+     * 2 = 11..20
+     * 3 = 21..30
+     * 4 = 31..40
+     * 5 = 41..50
+     * =====================================================
      */
-    private fun sendRoute(
-        width: Int,
-        height: Int
+
+    private fun showRouteGroup(
+        group: Int
     ) {
+
+        if (board.size < 25) {
+
+            sendStatus(
+                "P5A • ยังไม่ได้ CAPTURE 25/25"
+            )
+
+            return
+        }
+
+        val safeGroup =
+            group.coerceIn(
+                1,
+                5
+            )
+
+        val start =
+            when (safeGroup) {
+
+                1 -> 1
+                2 -> 11
+                3 -> 21
+                4 -> 31
+                else -> 41
+            }
+
+        val end =
+            minOf(
+                start + 9,
+                50
+            )
 
         val intent =
             Intent(
-                "NUMBER_FINDER_ROUTE"
+                ACTION_ROUTE
             )
 
         intent.setPackage(
@@ -601,38 +669,48 @@ class CaptureService : Service() {
 
         var count = 0
 
-        /*
-         * จุดที่ต้องการคือ
-         * currentTarget ถึง +4
-         */
         for (
-            number in
-            currentTarget..
-                minOf(
-                    50,
-                    currentTarget + 4
-                )
+            number in start..end
         ) {
 
-            val cell =
-                currentBoard[number]
+            /*
+             * 26..50 ใช้ตำแหน่ง
+             * 1..25 เดิม
+             */
+            val baseNumber =
+                if (
+                    number <= 25
+                ) {
+                    number
+                } else {
+                    number - 25
+                }
+
+            val position =
+                board[baseNumber]
                     ?: continue
 
-            val x =
+            /*
+             * Marker อยู่ในปุ่มจริง
+             *
+             * ขยับขึ้นเล็กน้อย
+             * แต่ยังอยู่ด้านในช่อง
+             *
+             * จุดนี้คือจุดที่ user
+             * สามารถแตะตามได้เลย
+             */
+            val markerYOffset =
                 (
-                    width *
-                        columnCenters[
-                            cell.second - 1
-                        ]
+                    screenHeight *
+                        0.010f
                 ).toInt()
 
+            val x =
+                position.first
+
             val y =
-                (
-                    height *
-                        rowCenters[
-                            cell.first - 1
-                        ]
-                ).toInt()
+                position.second -
+                    markerYOffset
 
             intent.putExtra(
                 "x_$count",
@@ -658,80 +736,35 @@ class CaptureService : Service() {
         )
 
         intent.putExtra(
-            "target",
-            currentTarget
+            "group",
+            safeGroup
         )
 
         sendBroadcast(intent)
 
         sendStatus(
-            "P4E • NEXT $currentTarget • ROUTE $count"
+            "P5A • ROUTE $start–$end"
         )
     }
 
-    private fun analyzeGrid(
-        bitmap: Bitmap,
-        width: Int,
-        height: Int
-    ): Boolean {
-
-        var validCells = 0
-
-        for (row in 0 until 5) {
-
-            for (column in 0 until 5) {
-
-                val centerX =
-                    (
-                        width *
-                            columnCenters[column]
-                    ).toInt()
-
-                val centerY =
-                    (
-                        height *
-                            rowCenters[row]
-                    ).toInt()
-
-                if (
-                    looksLikeCell(
-                        bitmap,
-                        centerX,
-                        centerY,
-                        width,
-                        height
-                    )
-                ) {
-                    validCells++
-                }
-            }
-        }
-
-        if (validCells >= 23) {
-            consecutiveGridFrames++
-        } else {
-            consecutiveGridFrames = 0
-        }
-
-        return (
-            consecutiveGridFrames >= 2
-        )
-    }
+    /*
+     * =====================================================
+     * OCR BOARD
+     * =====================================================
+     */
 
     private fun readBoard(
         result:
-            com.google.mlkit.vision.text.Text,
-        width: Int,
-        height: Int
+            com.google.mlkit.vision.text.Text
     ): Map<Int, Pair<Int, Int>> {
 
-        val board =
+        val detected =
             mutableMapOf<
                 Int,
                 Pair<Int, Int>
             >()
 
-        val occupied =
+        val occupiedCells =
             mutableSetOf<
                 Pair<Int, Int>
             >()
@@ -763,7 +796,7 @@ class CaptureService : Service() {
                             ?: continue
 
                     if (
-                        number !in 1..50
+                        number !in 1..25
                     ) {
                         continue
                     }
@@ -775,20 +808,45 @@ class CaptureService : Service() {
                     val cell =
                         nearestCell(
                             box.exactCenterX(),
-                            box.exactCenterY(),
-                            width,
-                            height
+                            box.exactCenterY()
                         ) ?: continue
 
+                    /*
+                     * ตำแหน่ง marker
+                     * ใช้ CENTER ของ cell
+                     * ไม่ใช้ center OCR glyph
+                     *
+                     * ทำให้ตำแหน่งแตะ
+                     * อยู่กลางปุ่มอย่างสม่ำเสมอ
+                     */
+                    val x =
+                        (
+                            screenWidth *
+                                columnCenters[
+                                    cell.second - 1
+                                ]
+                        ).toInt()
+
+                    val y =
+                        (
+                            screenHeight *
+                                rowCenters[
+                                    cell.first - 1
+                                ]
+                        ).toInt()
+
                     if (
-                        number !in board &&
-                        cell !in occupied
+                        number !in detected &&
+                        cell !in occupiedCells
                     ) {
 
-                        board[number] =
-                            cell
+                        detected[number] =
+                            Pair(
+                                x,
+                                y
+                            )
 
-                        occupied.add(
+                        occupiedCells.add(
                             cell
                         )
                     }
@@ -796,14 +854,12 @@ class CaptureService : Service() {
             }
         }
 
-        return board
+        return detected
     }
 
     private fun nearestCell(
         x: Float,
-        y: Float,
-        width: Int,
-        height: Int
+        y: Float
     ): Pair<Int, Int>? {
 
         var bestRow = -1
@@ -820,13 +876,15 @@ class CaptureService : Service() {
         ) {
 
             val cy =
-                height *
+                screenHeight *
                     rowCenters[row]
 
             val dy =
                 abs(y - cy)
 
-            if (dy < bestDy) {
+            if (
+                dy < bestDy
+            ) {
 
                 bestDy = dy
                 bestRow = row
@@ -838,13 +896,15 @@ class CaptureService : Service() {
         ) {
 
             val cx =
-                width *
+                screenWidth *
                     columnCenters[column]
 
             val dx =
                 abs(x - cx)
 
-            if (dx < bestDx) {
+            if (
+                dx < bestDx
+            ) {
 
                 bestDx = dx
                 bestColumn = column
@@ -852,17 +912,21 @@ class CaptureService : Service() {
         }
 
         if (
-            bestRow == -1 ||
-            bestColumn == -1
+            bestRow < 0 ||
+            bestColumn < 0
         ) {
             return null
         }
 
+        /*
+         * ป้องกัน OCR จาก header
+         * ถูกเอามาเป็นเลขบน board
+         */
         if (
             bestDx >
-            width * 0.065f ||
+            screenWidth * 0.065f ||
             bestDy >
-            height * 0.045f
+            screenHeight * 0.045f
         ) {
             return null
         }
@@ -873,104 +937,48 @@ class CaptureService : Service() {
         )
     }
 
-    private fun looksLikeCell(
-        bitmap: Bitmap,
-        centerX: Int,
-        centerY: Int,
-        width: Int,
-        height: Int
-    ): Boolean {
+    /*
+     * =====================================================
+     * RESET
+     * =====================================================
+     */
 
-        val dx =
-            maxOf(
-                6,
-                (
-                    width *
-                        0.025f
-                    ).toInt()
-            )
+    private fun resetSession() {
 
-        val dy =
-            maxOf(
-                6,
-                (
-                    height *
-                        0.012f
-                    ).toInt()
-            )
+        captureRequested = false
 
-        val offsets =
-            arrayOf(
-                intArrayOf(-dx, -dy),
-                intArrayOf(dx, -dy),
-                intArrayOf(-dx, dy),
-                intArrayOf(dx, dy),
-                intArrayOf(0, -dy * 2),
-                intArrayOf(0, dy * 2)
-            )
+        board.clear()
+        captureAccumulator.clear()
 
-        var light = 0
-        var neutral = 0
+        sendEmptyRoute()
 
-        for (
-            offset in offsets
-        ) {
-
-            val x =
-                (
-                    centerX +
-                        offset[0]
-                    ).coerceIn(
-                    0,
-                    bitmap.width - 1
-                )
-
-            val y =
-                (
-                    centerY +
-                        offset[1]
-                    ).coerceIn(
-                    0,
-                    bitmap.height - 1
-                )
-
-            val color =
-                bitmap.getPixel(
-                    x,
-                    y
-                )
-
-            val r =
-                Color.red(color)
-
-            val g =
-                Color.green(color)
-
-            val b =
-                Color.blue(color)
-
-            val brightness =
-                (r + g + b) / 3
-
-            if (
-                brightness >= 185
-            ) {
-                light++
-            }
-
-            if (
-                maxOf(r, g, b) -
-                    minOf(r, g, b)
-                <= 35
-            ) {
-                neutral++
-            }
-        }
-
-        return (
-            light >= 4 &&
-            neutral >= 4
+        sendStatus(
+            "P5A • RESET ✓ • กด CAPTURE เกมใหม่"
         )
+    }
+
+    private fun sendEmptyRoute() {
+
+        val intent =
+            Intent(
+                ACTION_ROUTE
+            )
+
+        intent.setPackage(
+            packageName
+        )
+
+        intent.putExtra(
+            "count",
+            0
+        )
+
+        intent.putExtra(
+            "group",
+            0
+        )
+
+        sendBroadcast(intent)
     }
 
     private fun sendStatus(
@@ -979,7 +987,7 @@ class CaptureService : Service() {
 
         val intent =
             Intent(
-                "NUMBER_FINDER_STATUS"
+                ACTION_STATUS
             )
 
         intent.setPackage(
@@ -1010,6 +1018,12 @@ class CaptureService : Service() {
     }
 
     override fun onDestroy() {
+
+        runCatching {
+            unregisterReceiver(
+                commandReceiver
+            )
+        }
 
         cleanupCapture()
 
