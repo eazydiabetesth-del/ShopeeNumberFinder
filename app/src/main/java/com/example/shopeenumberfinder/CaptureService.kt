@@ -2,6 +2,7 @@ package com.example.shopeenumberfinder
 
 import android.app.*
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
@@ -23,19 +24,17 @@ class CaptureService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private var frameCount = 0L
 
-    private val projectionCallback =
-        object : MediaProjection.Callback() {
-            override fun onStop() {
-                sendStatus("Projection stopped")
-                cleanupCapture()
-            }
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            sendStatus("Projection stopped")
+            cleanupCapture()
         }
+    }
 
     override fun onCreate() {
         super.onCreate()
 
-        val nm =
-            getSystemService(NOTIFICATION_SERVICE) as NotificationManager
+        val nm = getSystemService(NOTIFICATION_SERVICE) as NotificationManager
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             nm.createNotificationChannel(
@@ -61,16 +60,13 @@ class CaptureService : Service() {
                 Notification.Builder(this)
             }
                 .setContentTitle("Number Finder")
-                .setContentText("Phase 2C diagnostic")
+                .setContentText("Phase 3A pixel analysis")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .build()
 
         startForeground(1001, notification)
 
-        sendStatus("Capture service started")
-
         try {
-
             val resultCode =
                 intent?.getIntExtra(
                     "resultCode",
@@ -79,10 +75,7 @@ class CaptureService : Service() {
 
             val data =
                 if (Build.VERSION.SDK_INT >= 33) {
-                    intent?.getParcelableExtra(
-                        "data",
-                        Intent::class.java
-                    )
+                    intent?.getParcelableExtra("data", Intent::class.java)
                 } else {
                     @Suppress("DEPRECATION")
                     intent?.getParcelableExtra<Intent>("data")
@@ -93,30 +86,22 @@ class CaptureService : Service() {
                 return START_NOT_STICKY
             }
 
-            sendStatus("Permission OK")
-
             val mgr =
                 getSystemService(MEDIA_PROJECTION_SERVICE)
                         as MediaProjectionManager
 
             projection = mgr.getMediaProjection(resultCode, data)
 
-            sendStatus("Projection OK")
-
             projection?.registerCallback(
                 projectionCallback,
                 handler
             )
 
-            sendStatus("Callback OK")
-
             startCapture()
 
         } catch (e: Exception) {
-
             sendStatus(
-                "ERROR: ${e.javaClass.simpleName}: " +
-                    (e.message ?: "unknown")
+                "ERROR: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
             )
         }
 
@@ -126,7 +111,6 @@ class CaptureService : Service() {
     private fun startCapture() {
 
         try {
-
             val metrics = DisplayMetrics()
 
             @Suppress("DEPRECATION")
@@ -138,17 +122,12 @@ class CaptureService : Service() {
             val height = metrics.heightPixels
             val density = metrics.densityDpi
 
-            sendStatus("Display ${width}x${height}")
-
-            imageReader =
-                ImageReader.newInstance(
-                    width,
-                    height,
-                    PixelFormat.RGBA_8888,
-                    2
-                )
-
-            sendStatus("ImageReader OK")
+            imageReader = ImageReader.newInstance(
+                width,
+                height,
+                PixelFormat.RGBA_8888,
+                2
+            )
 
             imageReader?.setOnImageAvailableListener(
                 { reader ->
@@ -163,14 +142,85 @@ class CaptureService : Service() {
                     if (image != null) {
 
                         frameCount++
-                        image.close()
 
-                        if (
-                            frameCount == 1L ||
-                            frameCount % 30L == 0L
-                        ) {
-                            sendStatus("Frames: $frameCount")
+                        // วิเคราะห์ทุก 30 frames
+                        if (frameCount == 1L || frameCount % 30L == 0L) {
+
+                            try {
+                                val plane = image.planes[0]
+
+                                val buffer = plane.buffer
+                                val pixelStride = plane.pixelStride
+                                val rowStride = plane.rowStride
+
+                                val rowPadding =
+                                    rowStride - pixelStride * width
+
+                                val bitmapWidth =
+                                    width + rowPadding / pixelStride
+
+                                val bitmap =
+                                    Bitmap.createBitmap(
+                                        bitmapWidth,
+                                        height,
+                                        Bitmap.Config.ARGB_8888
+                                    )
+
+                                bitmap.copyPixelsFromBuffer(buffer)
+
+                                // Sample pixels เพื่อลดภาระ CPU
+                                var totalBrightness = 0L
+                                var samples = 0
+
+                                val stepX = maxOf(1, width / 40)
+                                val stepY = maxOf(1, height / 40)
+
+                                var y = 0
+
+                                while (y < height) {
+
+                                    var x = 0
+
+                                    while (x < width) {
+
+                                        val color = bitmap.getPixel(x, y)
+
+                                        val r = (color shr 16) and 0xff
+                                        val g = (color shr 8) and 0xff
+                                        val b = color and 0xff
+
+                                        totalBrightness +=
+                                            (r + g + b) / 3
+
+                                        samples++
+
+                                        x += stepX
+                                    }
+
+                                    y += stepY
+                                }
+
+                                val brightness =
+                                    if (samples > 0)
+                                        totalBrightness / samples
+                                    else
+                                        0
+
+                                sendStatus(
+                                    "P3A • F:$frameCount • Pixel:$brightness"
+                                )
+
+                                bitmap.recycle()
+
+                            } catch (e: Exception) {
+
+                                sendStatus(
+                                    "P3A ERROR: ${e.javaClass.simpleName}"
+                                )
+                            }
                         }
+
+                        image.close()
                     }
                 },
                 handler
@@ -188,27 +238,19 @@ class CaptureService : Service() {
                     handler
                 )
 
-            if (virtualDisplay != null) {
-                sendStatus("VirtualDisplay OK")
-            } else {
-                sendStatus("ERROR: VirtualDisplay null")
-            }
+            sendStatus("Phase 3A ready")
 
         } catch (e: Exception) {
-
             sendStatus(
-                "ERROR: ${e.javaClass.simpleName}: " +
-                    (e.message ?: "unknown")
+                "ERROR: ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
             )
         }
     }
 
     private fun sendStatus(message: String) {
-
         val i = Intent("NUMBER_FINDER_STATUS")
         i.setPackage(packageName)
         i.putExtra("status", message)
-
         sendBroadcast(i)
     }
 
