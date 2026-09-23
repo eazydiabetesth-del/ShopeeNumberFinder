@@ -13,7 +13,6 @@ import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.DisplayMetrics
 import android.view.WindowManager
-import kotlin.math.abs
 
 class CaptureService : Service() {
 
@@ -26,16 +25,7 @@ class CaptureService : Service() {
     private val handler = Handler(Looper.getMainLooper())
 
     private var frameCount = 0L
-    private var stableCount = 0
-    private var lastBrightness = -1L
-
-    private enum class GameState {
-        WAITING,
-        COUNTDOWN,
-        BOARD_READY
-    }
-
-    private var gameState = GameState.WAITING
+    private var consecutiveGridFrames = 0
 
     private val projectionCallback =
         object : MediaProjection.Callback() {
@@ -76,7 +66,7 @@ class CaptureService : Service() {
                 Notification.Builder(this)
             }
                 .setContentTitle("Number Finder")
-                .setContentText("Phase 3B board detector")
+                .setContentText("Phase 3C 5x5 grid detector")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .build()
 
@@ -102,7 +92,7 @@ class CaptureService : Service() {
                 }
 
             if (resultCode != Activity.RESULT_OK || data == null) {
-                sendStatus("P3B • ERROR permission")
+                sendStatus("P3C • ERROR permission")
                 return START_NOT_STICKY
             }
 
@@ -123,7 +113,7 @@ class CaptureService : Service() {
         } catch (e: Exception) {
 
             sendStatus(
-                "P3B ERROR: ${e.javaClass.simpleName}"
+                "P3C ERROR: ${e.javaClass.simpleName}"
             )
         }
 
@@ -167,9 +157,14 @@ class CaptureService : Service() {
 
                         frameCount++
 
-                        // วิเคราะห์ประมาณทุก 15 frames
-                        if (frameCount == 1L ||
-                            frameCount % 15L == 0L
+                        /*
+                         * วิเคราะห์ทุก 10 frames
+                         * เร็วพอสำหรับตรวจหน้าเกม
+                         * แต่ไม่กิน CPU โดยไม่จำเป็น
+                         */
+                        if (
+                            frameCount == 1L ||
+                            frameCount % 10L == 0L
                         ) {
 
                             try {
@@ -197,7 +192,7 @@ class CaptureService : Service() {
 
                                 bitmap.copyPixelsFromBuffer(buffer)
 
-                                analyzeFrame(
+                                analyzeGrid(
                                     bitmap,
                                     width,
                                     height
@@ -208,7 +203,7 @@ class CaptureService : Service() {
                             } catch (e: Exception) {
 
                                 sendStatus(
-                                    "P3B ERROR: " +
+                                    "P3C ERROR: " +
                                         e.javaClass.simpleName
                                 )
                             }
@@ -233,175 +228,245 @@ class CaptureService : Service() {
                     handler
                 )
 
-            sendStatus("P3B • WAITING")
+            sendStatus("P3C • SEARCHING")
 
         } catch (e: Exception) {
 
             sendStatus(
-                "P3B ERROR: ${e.javaClass.simpleName}"
+                "P3C ERROR: ${e.javaClass.simpleName}"
             )
         }
     }
 
-    private fun analyzeFrame(
+    private fun analyzeGrid(
         bitmap: Bitmap,
         width: Int,
         height: Int
     ) {
 
         /*
-         * วิเคราะห์เฉพาะบริเวณเกม
+         * Geometry จากหน้าเกมที่ทดสอบ
          *
-         * จากภาพตัวอย่าง:
-         * ส่วนตารางอยู่ประมาณ
-         * Y = 28% ถึง 88% ของจอ
+         * ศูนย์กลาง column:
+         * ~12%, 31%, 50%, 69%, 88%
          *
-         * เราไม่สนใจ status bar,
-         * header Shopee และ navigation bar
+         * ศูนย์กลาง row:
+         * ~34%, 46%, 58%, 70%, 82%
+         *
+         * ใช้ normalized coordinates
+         * จึงไม่ผูกกับ pixel resolution ตรง ๆ
          */
 
-        val startX = (width * 0.04).toInt()
-        val endX = (width * 0.96).toInt()
-
-        val startY = (height * 0.28).toInt()
-        val endY = (height * 0.88).toInt()
-
-        var brightnessTotal = 0L
-        var samples = 0
-
-        var lightPixels = 0
-        var darkPixels = 0
-
-        val stepX =
-            maxOf(1, (endX - startX) / 40)
-
-        val stepY =
-            maxOf(1, (endY - startY) / 50)
-
-        var y = startY
-
-        while (y < endY) {
-
-            var x = startX
-
-            while (x < endX) {
-
-                val color =
-                    bitmap.getPixel(x, y)
-
-                val r = Color.red(color)
-                val g = Color.green(color)
-                val b = Color.blue(color)
-
-                val brightness =
-                    (r + g + b) / 3
-
-                brightnessTotal += brightness
-                samples++
-
-                if (brightness > 205)
-                    lightPixels++
-
-                if (brightness < 100)
-                    darkPixels++
-
-                x += stepX
-            }
-
-            y += stepY
-        }
-
-        if (samples == 0)
-            return
-
-        val brightness =
-            brightnessTotal / samples
-
-        val lightRatio =
-            lightPixels.toFloat() / samples
-
-        val darkRatio =
-            darkPixels.toFloat() / samples
-
-        /*
-         * COUNTDOWN detection
-         *
-         * ตอน 3/2/1 หน้าจอจะถูก dark overlay
-         * ทำให้ darkRatio สูงกว่าหน้าเกมปกติ
-         */
-
-        if (
-            brightness < 150 ||
-            darkRatio > 0.45f
-        ) {
-
-            gameState = GameState.COUNTDOWN
-            stableCount = 0
-            lastBrightness = brightness
-
-            sendStatus(
-                "P3B • COUNTDOWN • B:$brightness"
+        val columnCenters =
+            floatArrayOf(
+                0.12f,
+                0.31f,
+                0.50f,
+                0.69f,
+                0.88f
             )
 
-            return
+        val rowCenters =
+            floatArrayOf(
+                0.34f,
+                0.46f,
+                0.58f,
+                0.70f,
+                0.82f
+            )
+
+        var validCells = 0
+
+        for (row in 0 until 5) {
+
+            for (column in 0 until 5) {
+
+                val centerX =
+                    (width *
+                        columnCenters[column])
+                        .toInt()
+
+                val centerY =
+                    (height *
+                        rowCenters[row])
+                        .toInt()
+
+                if (
+                    looksLikeCell(
+                        bitmap,
+                        centerX,
+                        centerY,
+                        width,
+                        height
+                    )
+                ) {
+                    validCells++
+                }
+            }
         }
 
         /*
-         * ตรวจความนิ่งหลัง countdown
+         * ต้องพบอย่างน้อย 23 จาก 25 ช่อง
+         *
+         * ยอมให้คลาดเคลื่อนเล็กน้อยจาก
+         * animation / highlight / overlay
          */
 
-        if (lastBrightness >= 0) {
+        if (validCells >= 23) {
 
-            val difference =
-                abs(brightness - lastBrightness)
+            consecutiveGridFrames++
 
-            if (difference < 12)
-                stableCount++
-            else
-                stableCount = 0
+        } else {
+
+            consecutiveGridFrames = 0
         }
 
-        lastBrightness = brightness
-
         /*
-         * หน้า board มี background ขาว/เทา
-         * จำนวน light pixel จะค่อนข้างสูง
+         * ต้องผ่าน 3 analysis ติดต่อกัน
+         * ป้องกัน transition frame
+         * และช่วง countdown 3-2-1
          */
 
-        val looksLikeBoard =
-            lightRatio > 0.50f &&
-            brightness > 175
-
-        if (
-            looksLikeBoard &&
-            stableCount >= 2
-        ) {
-
-            gameState = GameState.BOARD_READY
+        if (consecutiveGridFrames >= 3) {
 
             sendStatus(
-                "P3B • BOARD READY ✓"
+                "P3C • GRID READY ✓ • $validCells/25"
             )
 
         } else {
 
-            gameState = GameState.WAITING
-
             sendStatus(
-                "P3B • WAITING • " +
-                    "B:$brightness • " +
-                    "L:${(lightRatio * 100).toInt()}%"
+                "P3C • SEARCHING • $validCells/25"
             )
         }
     }
 
-    private fun sendStatus(message: String) {
+    private fun looksLikeCell(
+        bitmap: Bitmap,
+        centerX: Int,
+        centerY: Int,
+        width: Int,
+        height: Int
+    ): Boolean {
+
+        /*
+         * อย่า sample ตรงกลางเพียงจุดเดียว
+         * เพราะตรงนั้นมีตัวเลขสีเข้ม
+         *
+         * sample รอบ ๆ ตัวเลขแทน
+         */
+
+        val dx =
+            maxOf(
+                6,
+                (width * 0.025f).toInt()
+            )
+
+        val dy =
+            maxOf(
+                6,
+                (height * 0.012f).toInt()
+            )
+
+        val offsets =
+            arrayOf(
+                intArrayOf(-dx, -dy),
+                intArrayOf(dx, -dy),
+                intArrayOf(-dx, dy),
+                intArrayOf(dx, dy),
+                intArrayOf(0, -dy * 2),
+                intArrayOf(0, dy * 2)
+            )
+
+        var lightSamples = 0
+        var neutralSamples = 0
+        var totalSamples = 0
+
+        for (offset in offsets) {
+
+            val x =
+                (centerX + offset[0])
+                    .coerceIn(
+                        0,
+                        bitmap.width - 1
+                    )
+
+            val y =
+                (centerY + offset[1])
+                    .coerceIn(
+                        0,
+                        bitmap.height - 1
+                    )
+
+            val color =
+                bitmap.getPixel(x, y)
+
+            val r = Color.red(color)
+            val g = Color.green(color)
+            val b = Color.blue(color)
+
+            val brightness =
+                (r + g + b) / 3
+
+            /*
+             * ช่องเกมเป็นขาว/เทาอ่อน
+             */
+
+            if (brightness >= 185) {
+                lightSamples++
+            }
+
+            /*
+             * สีพื้นช่องควรค่อนข้าง neutral
+             * R/G/B ไม่ต่างกันมาก
+             *
+             * ช่วยแยกจาก background
+             * หรือ element สีต่าง ๆ
+             */
+
+            val maxChannel =
+                maxOf(r, g, b)
+
+            val minChannel =
+                minOf(r, g, b)
+
+            if (
+                maxChannel -
+                minChannel <= 35
+            ) {
+                neutralSamples++
+            }
+
+            totalSamples++
+        }
+
+        /*
+         * อย่างน้อย 4/6 จุดต้องสว่าง
+         * และอย่างน้อย 4/6 จุดต้องเป็น
+         * สีขาว/เทาค่อนข้าง neutral
+         */
+
+        return (
+            lightSamples >= 4 &&
+            neutralSamples >= 4 &&
+            totalSamples == offsets.size
+        )
+    }
+
+    private fun sendStatus(
+        message: String
+    ) {
 
         val i =
-            Intent("NUMBER_FINDER_STATUS")
+            Intent(
+                "NUMBER_FINDER_STATUS"
+            )
 
         i.setPackage(packageName)
-        i.putExtra("status", message)
+        i.putExtra(
+            "status",
+            message
+        )
 
         sendBroadcast(i)
     }
