@@ -1,10 +1,6 @@
 package com.example.shopeenumberfinder
 
-import android.app.Activity
-import android.app.Notification
-import android.app.NotificationChannel
-import android.app.NotificationManager
-import android.app.Service
+import android.app.*
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.Color
@@ -14,10 +10,7 @@ import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
-import android.os.Build
-import android.os.Handler
-import android.os.IBinder
-import android.os.Looper
+import android.os.*
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.google.mlkit.vision.common.InputImage
@@ -39,34 +32,32 @@ class CaptureService : Service() {
     private var consecutiveGridFrames = 0
 
     private var ocrBusy = false
-    private var boardLocked = false
 
     /*
-     * number -> row,column
+     * number -> (row,column)
+     *
+     * map นี้จะมีทั้ง 1-25 และเมื่อเกมเปลี่ยน
+     * ก็จะค่อย ๆ กลายเป็น 26-50
      */
-    private val savedBoard =
+    private val currentBoard =
         mutableMapOf<Int, Pair<Int, Int>>()
 
     /*
-     * เป้าหมายปัจจุบัน 1..25
+     * OCR ล่าสุดที่ยืนยันแล้วว่า next คืออะไร
      */
     private var currentTarget = 1
 
     /*
-     * Fast detector
-     *
-     * เก็บ signature ของช่องเป้าหมาย
-     * แล้วดูว่าภาพในช่องเปลี่ยนมากพอหรือยัง
+     * ใช้ป้องกัน route กระพริบจาก OCR frame เดียว
      */
-    private var targetSignature: Long? = null
-    private var targetStableFrames = 0
-    private var changeFrames = 0
+    private var candidateTarget = -1
+    private var candidateCount = 0
 
     /*
-     * หลังเลื่อนไป target ใหม่
-     * เว้น frame สั้น ๆ เพื่อสร้าง baseline ใหม่
+     * OCR ทุกประมาณ 6 captured frames
+     * ไม่ต้องรอ pixel detector แบบ 4D
      */
-    private var baselineDelayFrames = 0
+    private val ocrEveryFrames = 6L
 
     private val recognizer =
         TextRecognition.getClient(
@@ -93,9 +84,7 @@ class CaptureService : Service() {
 
     private val projectionCallback =
         object : MediaProjection.Callback() {
-
             override fun onStop() {
-                sendStatus("Projection stopped")
                 cleanupCapture()
             }
         }
@@ -142,7 +131,7 @@ class CaptureService : Service() {
             }
                 .setContentTitle("Number Finder")
                 .setContentText(
-                    "Phase 4D five-step preview"
+                    "Phase 4E rolling route"
                 )
                 .setSmallIcon(
                     android.R.drawable.ic_menu_view
@@ -180,7 +169,7 @@ class CaptureService : Service() {
                 data == null
             ) {
                 sendStatus(
-                    "P4D • ERROR permission"
+                    "P4E • ERROR permission"
                 )
                 return START_NOT_STICKY
             }
@@ -206,7 +195,7 @@ class CaptureService : Service() {
         } catch (e: Exception) {
 
             sendStatus(
-                "P4D ERROR: " +
+                "P4E ERROR: " +
                     e.javaClass.simpleName
             )
         }
@@ -256,100 +245,86 @@ class CaptureService : Service() {
 
                             frameCount++
 
-                            try {
+                            /*
+                             * OCR ไม่ต้องทำทุก frame
+                             */
+                            if (
+                                frameCount == 1L ||
+                                frameCount %
+                                    ocrEveryFrames == 0L
+                            ) {
 
-                                val plane =
-                                    image.planes[0]
+                                try {
 
-                                val buffer =
-                                    plane.buffer
+                                    val plane =
+                                        image.planes[0]
 
-                                val pixelStride =
-                                    plane.pixelStride
+                                    val buffer =
+                                        plane.buffer
 
-                                val rowStride =
-                                    plane.rowStride
+                                    val pixelStride =
+                                        plane.pixelStride
 
-                                val rowPadding =
-                                    rowStride -
-                                        pixelStride * width
+                                    val rowStride =
+                                        plane.rowStride
 
-                                val bitmapWidth =
-                                    width +
-                                        rowPadding /
-                                        pixelStride
+                                    val rowPadding =
+                                        rowStride -
+                                            pixelStride * width
 
-                                val bitmap =
-                                    Bitmap.createBitmap(
-                                        bitmapWidth,
-                                        height,
-                                        Bitmap.Config.ARGB_8888
+                                    val bitmapWidth =
+                                        width +
+                                            rowPadding /
+                                            pixelStride
+
+                                    val bitmap =
+                                        Bitmap.createBitmap(
+                                            bitmapWidth,
+                                            height,
+                                            Bitmap.Config.ARGB_8888
+                                        )
+
+                                    bitmap.copyPixelsFromBuffer(
+                                        buffer
                                     )
 
-                                bitmap.copyPixelsFromBuffer(
-                                    buffer
-                                )
-
-                                /*
-                                 * ก่อนล็อก board:
-                                 * ใช้ detector + OCR
-                                 *
-                                 * หลังล็อก:
-                                 * ทุก frame ใช้ fast detector
-                                 */
-                                if (!boardLocked) {
+                                    val gridReady =
+                                        analyzeGrid(
+                                            bitmap,
+                                            width,
+                                            height
+                                        )
 
                                     if (
-                                        frameCount == 1L ||
-                                        frameCount % 6L == 0L
+                                        gridReady &&
+                                        !ocrBusy
                                     ) {
 
-                                        val ready =
-                                            analyzeGrid(
+                                        val copy =
+                                            Bitmap.createBitmap(
                                                 bitmap,
+                                                0,
+                                                0,
                                                 width,
                                                 height
                                             )
 
-                                        if (
-                                            ready &&
-                                            !ocrBusy
-                                        ) {
-
-                                            val copy =
-                                                Bitmap.createBitmap(
-                                                    bitmap,
-                                                    0,
-                                                    0,
-                                                    width,
-                                                    height
-                                                )
-
-                                            readInitialBoard(
-                                                copy,
-                                                width,
-                                                height
-                                            )
-                                        }
+                                        analyzeBoardOcr(
+                                            copy,
+                                            width,
+                                            height
+                                        )
                                     }
 
-                                } else {
+                                    bitmap.recycle()
 
-                                    analyzeCurrentTargetFast(
-                                        bitmap,
-                                        width,
-                                        height
+                                } catch (e: Exception) {
+
+                                    sendStatus(
+                                        "P4E ERROR: " +
+                                            e.javaClass.simpleName
                                     )
                                 }
-
-                                bitmap.recycle()
-
-                            } catch (e: Exception) {
-
-                                sendStatus(
-                                    "P4D ERROR: " +
-                                        e.javaClass.simpleName
-                                )
                             }
 
                             image.close()
@@ -372,19 +347,19 @@ class CaptureService : Service() {
                 )
 
             sendStatus(
-                "P4D • SEARCHING"
+                "P4E • SEARCHING"
             )
 
         } catch (e: Exception) {
 
             sendStatus(
-                "P4D ERROR: " +
+                "P4E ERROR: " +
                     e.javaClass.simpleName
             )
         }
     }
 
-    private fun readInitialBoard(
+    private fun analyzeBoardOcr(
         bitmap: Bitmap,
         width: Int,
         height: Int
@@ -401,49 +376,94 @@ class CaptureService : Service() {
             )
             .addOnSuccessListener { result ->
 
-                val board =
+                val detected =
                     readBoard(
                         result,
                         width,
                         height
                     )
 
-                val complete =
-                    board.size == 25 &&
-                        (1..25).all {
-                            board.containsKey(it)
+                /*
+                 * ต้องเห็นจำนวนช่องมากพอ
+                 * ถึงจะยอมใช้ frame นี้
+                 */
+                if (detected.size >= 20) {
+
+                    /*
+                     * update map ด้วยเลขที่ OCR เห็น
+                     *
+                     * ก่อนใส่เลขใหม่ใน cell เดียวกัน
+                     * ลบเลขเก่าที่เคยอยู่ cell นั้นก่อน
+                     */
+                    for (
+                        entry in detected
+                    ) {
+
+                        val number =
+                            entry.key
+
+                        val cell =
+                            entry.value
+
+                        val oldNumbers =
+                            currentBoard
+                                .filterValues {
+                                    it == cell
+                                }
+                                .keys
+                                .toList()
+
+                        for (
+                            old in oldNumbers
+                        ) {
+                            currentBoard.remove(old)
                         }
 
-                if (complete) {
+                        currentBoard[number] =
+                            cell
+                    }
 
-                    savedBoard.clear()
-                    savedBoard.putAll(board)
+                    /*
+                     * หาเลขที่เกมกำลังต้องการ
+                     *
+                     * รอบแรก:
+                     * ถ้า 1 หาย แต่ 2 ยังอยู่ -> next 2
+                     *
+                     * ทำแบบเดียวกันไปจน 25
+                     *
+                     * หลัง 25 จะเริ่มหา 26..50
+                     */
+                    val inferred =
+                        inferTarget(
+                            detected
+                        )
 
-                    currentTarget = 1
-                    boardLocked = true
+                    if (
+                        inferred != null
+                    ) {
 
-                    targetSignature = null
-                    targetStableFrames = 0
-                    changeFrames = 0
-                    baselineDelayFrames = 2
+                        confirmTarget(
+                            inferred,
+                            width,
+                            height
+                        )
+                    }
 
-                    sendPreview(
+                    /*
+                     * ถ้ายังอยู่ target เดิม
+                     * แต่ map มีข้อมูลใหม่
+                     * ก็ redraw ได้
+                     */
+                    sendRoute(
                         width,
                         height
-                    )
-
-                } else {
-
-                    sendStatus(
-                        "P4D • BOARD " +
-                            "${board.size}/25"
                     )
                 }
             }
             .addOnFailureListener { e ->
 
                 sendStatus(
-                    "P4D OCR ERROR: " +
+                    "P4E OCR ERROR: " +
                         e.javaClass.simpleName
                 )
             }
@@ -454,328 +474,148 @@ class CaptureService : Service() {
             }
     }
 
-    /*
-     * FAST PATH
-     *
-     * ไม่มี ML Kit ตรงนี้
-     *
-     * ดู pixel pattern รอบตัวเลขของ
-     * currentTarget ทุก captured frame
-     */
-    private fun analyzeCurrentTargetFast(
-        bitmap: Bitmap,
-        width: Int,
-        height: Int
-    ) {
-
-        if (currentTarget !in 1..25) {
-            return
-        }
-
-        val cell =
-            savedBoard[currentTarget]
-                ?: return
-
-        val cx =
-            (
-                width *
-                    columnCenters[
-                        cell.second - 1
-                    ]
-            ).toInt()
-
-        val cy =
-            (
-                height *
-                    rowCenters[
-                        cell.first - 1
-                    ]
-            ).toInt()
-
-        val signature =
-            cellSignature(
-                bitmap,
-                cx,
-                cy,
-                width,
-                height
-            )
+    private fun inferTarget(
+        detected:
+            Map<Int, Pair<Int, Int>>
+    ): Int? {
 
         /*
-         * หลังเปลี่ยน target
-         * รอเล็กน้อยก่อนสร้าง baseline
+         * เกมเปลี่ยน N -> N+25
+         *
+         * ตัวอย่าง:
+         * 1 ถูกกดแล้ว จะเห็น 26
+         * แต่ไม่เห็น 1
+         *
+         * ดังนั้นหาเลขต่ำสุดใน 1..25
+         * ที่ยังปรากฏอยู่
          */
-        if (baselineDelayFrames > 0) {
 
-            baselineDelayFrames--
-
-            if (baselineDelayFrames == 0) {
-                targetSignature = signature
-                targetStableFrames = 1
-            }
-
-            return
-        }
-
-        val baseline =
-            targetSignature
-
-        if (baseline == null) {
-
-            targetSignature = signature
-            targetStableFrames = 1
-
-            return
-        }
-
-        val difference =
-            signatureDifference(
-                baseline,
-                signature
-            )
-
-        /*
-         * ถ้าภาพยังเหมือนเดิม
-         * ค่อย ๆ update baseline
-         */
-        if (difference < 18) {
-
-            changeFrames = 0
-
-            if (targetStableFrames < 8) {
-                targetStableFrames++
-            }
-
-            if (targetStableFrames <= 4) {
-                targetSignature = signature
-            }
-
-            return
-        }
-
-        /*
-         * ต้องเห็นการเปลี่ยน 2 frame
-         * ติดต่อกัน ป้องกัน animation/noise
-         */
-        changeFrames++
-
-        if (
-            changeFrames >= 2 &&
-            targetStableFrames >= 1
+        for (
+            n in currentTarget..25
         ) {
 
-            advanceTarget(
-                width,
-                height
-            )
+            if (
+                detected.containsKey(n)
+            ) {
+                return n
+            }
         }
+
+        /*
+         * เมื่อ 1..25 หมดแล้ว
+         * เริ่มรอบ 26..50
+         */
+        if (currentTarget >= 25) {
+
+            for (n in 26..50) {
+
+                if (
+                    detected.containsKey(n)
+                ) {
+                    return n
+                }
+            }
+        }
+
+        return null
     }
 
-    private fun advanceTarget(
+    private fun confirmTarget(
+        target: Int,
         width: Int,
         height: Int
     ) {
 
-        currentTarget++
+        /*
+         * ห้ามถอยหลัง
+         */
+        if (
+            target < currentTarget
+        ) {
+            return
+        }
 
-        targetSignature = null
-        targetStableFrames = 0
-        changeFrames = 0
+        if (
+            target ==
+            currentTarget
+        ) {
 
-        baselineDelayFrames = 2
+            candidateTarget = -1
+            candidateCount = 0
 
-        if (currentTarget <= 25) {
+            return
+        }
 
-            sendPreview(
-                width,
-                height
-            )
+        if (
+            candidateTarget ==
+            target
+        ) {
+
+            candidateCount++
 
         } else {
 
-            sendClearPreview(
-                "P4D • 1-25 COMPLETE ✓"
-            )
+            candidateTarget =
+                target
+
+            candidateCount = 1
         }
-    }
 
-    /*
-     * สร้าง signature 5x5 จุด
-     * รอบบริเวณตัวเลข
-     *
-     * pack brightness เป็น 4-bit ต่อ sample
-     * ใช้ 16 samplesหลักสำหรับ Long
-     */
-    private fun cellSignature(
-        bitmap: Bitmap,
-        centerX: Int,
-        centerY: Int,
-        width: Int,
-        height: Int
-    ): Long {
-
-        val stepX =
-            maxOf(
-                5,
-                (width * 0.012f).toInt()
-            )
-
-        val stepY =
-            maxOf(
-                5,
-                (height * 0.008f).toInt()
-            )
-
-        val offsets =
-            arrayOf(
-                intArrayOf(-2, -2),
-                intArrayOf(-1, -2),
-                intArrayOf(0, -2),
-                intArrayOf(1, -2),
-
-                intArrayOf(-2, -1),
-                intArrayOf(-1, -1),
-                intArrayOf(0, -1),
-                intArrayOf(1, -1),
-
-                intArrayOf(-2, 0),
-                intArrayOf(-1, 0),
-                intArrayOf(0, 0),
-                intArrayOf(1, 0),
-
-                intArrayOf(-2, 1),
-                intArrayOf(-1, 1),
-                intArrayOf(0, 1),
-                intArrayOf(1, 1)
-            )
-
-        var signature = 0L
-
-        for (
-            index in offsets.indices
+        /*
+         * ต้องเห็นตรงกัน 2 OCR
+         * ติดต่อกันก่อนเปลี่ยน route
+         */
+        if (
+            candidateCount >= 2
         ) {
 
-            val offset =
-                offsets[index]
+            currentTarget =
+                target
 
-            val x =
-                (
-                    centerX +
-                        offset[0] *
-                        stepX
-                ).coerceIn(
-                    0,
-                    bitmap.width - 1
-                )
+            candidateTarget = -1
+            candidateCount = 0
 
-            val y =
-                (
-                    centerY +
-                        offset[1] *
-                        stepY
-                ).coerceIn(
-                    0,
-                    bitmap.height - 1
-                )
-
-            val color =
-                bitmap.getPixel(
-                    x,
-                    y
-                )
-
-            val brightness =
-                (
-                    Color.red(color) +
-                        Color.green(color) +
-                        Color.blue(color)
-                    ) / 3
-
-            /*
-             * 0..255 -> 0..15
-             */
-            val level =
-                (brightness / 16)
-                    .coerceIn(
-                        0,
-                        15
-                    )
-
-            signature =
-                signature or
-                    (
-                        level.toLong() shl
-                            (index * 4)
-                    )
+            sendRoute(
+                width,
+                height
+            )
         }
-
-        return signature
-    }
-
-    private fun signatureDifference(
-        a: Long,
-        b: Long
-    ): Int {
-
-        var difference = 0
-
-        for (i in 0 until 16) {
-
-            val shift =
-                i * 4
-
-            val va =
-                (
-                    (a shr shift) and 0xF
-                ).toInt()
-
-            val vb =
-                (
-                    (b shr shift) and 0xF
-                ).toInt()
-
-            difference +=
-                abs(va - vb)
-        }
-
-        return difference
     }
 
     /*
-     * ส่งตำแหน่งล่วงหน้าสูงสุด 5 ตัว
+     * ส่ง route สูงสุด 5 จุด
      */
-    private fun sendPreview(
+    private fun sendRoute(
         width: Int,
         height: Int
     ) {
 
         val intent =
             Intent(
-                "NUMBER_FINDER_STATUS"
+                "NUMBER_FINDER_ROUTE"
             )
 
         intent.setPackage(
             packageName
         )
 
-        intent.putExtra(
-            "status",
-            "P4D • NEXT $currentTarget"
-        )
+        var count = 0
 
-        var slot = 0
-
+        /*
+         * จุดที่ต้องการคือ
+         * currentTarget ถึง +4
+         */
         for (
             number in
             currentTarget..
                 minOf(
-                    25,
+                    50,
                     currentTarget + 4
                 )
         ) {
 
             val cell =
-                savedBoard[number]
+                currentBoard[number]
                     ?: continue
 
             val x =
@@ -795,58 +635,38 @@ class CaptureService : Service() {
                 ).toInt()
 
             intent.putExtra(
-                "preview_${slot}_x",
+                "x_$count",
                 x
             )
 
             intent.putExtra(
-                "preview_${slot}_y",
+                "y_$count",
                 y
             )
 
-            /*
-             * แสดงเลขจริงที่ต้องกด
-             */
             intent.putExtra(
-                "preview_${slot}_number",
+                "number_$count",
                 number
             )
 
-            slot++
+            count++
         }
 
         intent.putExtra(
-            "preview_count",
-            slot
-        )
-
-        sendBroadcast(intent)
-    }
-
-    private fun sendClearPreview(
-        message: String
-    ) {
-
-        val intent =
-            Intent(
-                "NUMBER_FINDER_STATUS"
-            )
-
-        intent.setPackage(
-            packageName
+            "count",
+            count
         )
 
         intent.putExtra(
-            "status",
-            message
-        )
-
-        intent.putExtra(
-            "preview_count",
-            0
+            "target",
+            currentTarget
         )
 
         sendBroadcast(intent)
+
+        sendStatus(
+            "P4E • NEXT $currentTarget • ROUTE $count"
+        )
     }
 
     private fun analyzeGrid(
@@ -893,19 +713,9 @@ class CaptureService : Service() {
             consecutiveGridFrames = 0
         }
 
-        if (
-            consecutiveGridFrames < 3
-        ) {
-
-            sendStatus(
-                "P4D • SEARCHING • " +
-                    "$validCells/25"
-            )
-
-            return false
-        }
-
-        return true
+        return (
+            consecutiveGridFrames >= 2
+        )
     }
 
     private fun readBoard(
@@ -930,7 +740,9 @@ class CaptureService : Service() {
             block in result.textBlocks
         ) {
 
-            for (line in block.lines) {
+            for (
+                line in block.lines
+            ) {
 
                 for (
                     element in line.elements
@@ -940,7 +752,9 @@ class CaptureService : Service() {
                         element.text
                             .trim()
                             .replace(
-                                Regex("[^0-9]"),
+                                Regex(
+                                    "[^0-9]"
+                                ),
                                 ""
                             )
 
@@ -949,7 +763,7 @@ class CaptureService : Service() {
                             ?: continue
 
                     if (
-                        number !in 1..25
+                        number !in 1..50
                     ) {
                         continue
                     }
@@ -1001,7 +815,9 @@ class CaptureService : Service() {
         var bestDy =
             Float.MAX_VALUE
 
-        for (row in 0 until 5) {
+        for (
+            row in 0 until 5
+        ) {
 
             val cy =
                 height *
@@ -1017,7 +833,9 @@ class CaptureService : Service() {
             }
         }
 
-        for (column in 0 until 5) {
+        for (
+            column in 0 until 5
+        ) {
 
             val cx =
                 width *
@@ -1066,13 +884,19 @@ class CaptureService : Service() {
         val dx =
             maxOf(
                 6,
-                (width * 0.025f).toInt()
+                (
+                    width *
+                        0.025f
+                    ).toInt()
             )
 
         val dy =
             maxOf(
                 6,
-                (height * 0.012f).toInt()
+                (
+                    height *
+                        0.012f
+                    ).toInt()
             )
 
         val offsets =
@@ -1085,16 +909,18 @@ class CaptureService : Service() {
                 intArrayOf(0, dy * 2)
             )
 
-        var lightSamples = 0
-        var neutralSamples = 0
+        var light = 0
+        var neutral = 0
 
-        for (offset in offsets) {
+        for (
+            offset in offsets
+        ) {
 
             val x =
                 (
                     centerX +
                         offset[0]
-                ).coerceIn(
+                    ).coerceIn(
                     0,
                     bitmap.width - 1
                 )
@@ -1103,7 +929,7 @@ class CaptureService : Service() {
                 (
                     centerY +
                         offset[1]
-                ).coerceIn(
+                    ).coerceIn(
                     0,
                     bitmap.height - 1
                 )
@@ -1129,26 +955,21 @@ class CaptureService : Service() {
             if (
                 brightness >= 185
             ) {
-                lightSamples++
+                light++
             }
 
-            val maxChannel =
-                maxOf(r, g, b)
-
-            val minChannel =
-                minOf(r, g, b)
-
             if (
-                maxChannel -
-                    minChannel <= 35
+                maxOf(r, g, b) -
+                    minOf(r, g, b)
+                <= 35
             ) {
-                neutralSamples++
+                neutral++
             }
         }
 
         return (
-            lightSamples >= 4 &&
-            neutralSamples >= 4
+            light >= 4 &&
+            neutral >= 4
         )
     }
 
