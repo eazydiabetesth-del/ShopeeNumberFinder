@@ -13,6 +13,10 @@ import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.DisplayMetrics
 import android.view.WindowManager
+import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.text.TextRecognition
+import com.google.mlkit.vision.text.latin.TextRecognizerOptions
+import kotlin.math.abs
 
 class CaptureService : Service() {
 
@@ -26,6 +30,24 @@ class CaptureService : Service() {
 
     private var frameCount = 0L
     private var consecutiveGridFrames = 0
+
+    private var ocrBusy = false
+    private var lastOcrTime = 0L
+
+    private val recognizer =
+        TextRecognition.getClient(
+            TextRecognizerOptions.DEFAULT_OPTIONS
+        )
+
+    private val columnCenters =
+        floatArrayOf(
+            0.12f, 0.31f, 0.50f, 0.69f, 0.88f
+        )
+
+    private val rowCenters =
+        floatArrayOf(
+            0.34f, 0.46f, 0.58f, 0.70f, 0.82f
+        )
 
     private val projectionCallback =
         object : MediaProjection.Callback() {
@@ -66,7 +88,7 @@ class CaptureService : Service() {
                 Notification.Builder(this)
             }
                 .setContentTitle("Number Finder")
-                .setContentText("Phase 3C 5x5 grid detector")
+                .setContentText("Phase 3D board OCR")
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .build()
 
@@ -92,7 +114,7 @@ class CaptureService : Service() {
                 }
 
             if (resultCode != Activity.RESULT_OK || data == null) {
-                sendStatus("P3C • ERROR permission")
+                sendStatus("P3D • ERROR permission")
                 return START_NOT_STICKY
             }
 
@@ -111,9 +133,8 @@ class CaptureService : Service() {
             startCapture()
 
         } catch (e: Exception) {
-
             sendStatus(
-                "P3C ERROR: ${e.javaClass.simpleName}"
+                "P3D ERROR: ${e.javaClass.simpleName}"
             )
         }
 
@@ -149,7 +170,7 @@ class CaptureService : Service() {
                     val image =
                         try {
                             reader.acquireLatestImage()
-                        } catch (e: Exception) {
+                        } catch (_: Exception) {
                             null
                         }
 
@@ -157,11 +178,6 @@ class CaptureService : Service() {
 
                         frameCount++
 
-                        /*
-                         * วิเคราะห์ทุก 10 frames
-                         * เร็วพอสำหรับตรวจหน้าเกม
-                         * แต่ไม่กิน CPU โดยไม่จำเป็น
-                         */
                         if (
                             frameCount == 1L ||
                             frameCount % 10L == 0L
@@ -170,7 +186,6 @@ class CaptureService : Service() {
                             try {
 
                                 val plane = image.planes[0]
-
                                 val buffer = plane.buffer
                                 val pixelStride = plane.pixelStride
                                 val rowStride = plane.rowStride
@@ -192,18 +207,44 @@ class CaptureService : Service() {
 
                                 bitmap.copyPixelsFromBuffer(buffer)
 
-                                analyzeGrid(
-                                    bitmap,
-                                    width,
-                                    height
-                                )
+                                val gridReady =
+                                    analyzeGrid(
+                                        bitmap,
+                                        width,
+                                        height
+                                    )
+
+                                if (
+                                    gridReady &&
+                                    !ocrBusy &&
+                                    SystemClock.elapsedRealtime() -
+                                        lastOcrTime >= 700
+                                ) {
+
+                                    lastOcrTime =
+                                        SystemClock.elapsedRealtime()
+
+                                    val copy =
+                                        Bitmap.createBitmap(
+                                            bitmap,
+                                            0,
+                                            0,
+                                            width,
+                                            height
+                                        )
+
+                                    runOcr(
+                                        copy,
+                                        width,
+                                        height
+                                    )
+                                }
 
                                 bitmap.recycle()
 
                             } catch (e: Exception) {
-
                                 sendStatus(
-                                    "P3C ERROR: " +
+                                    "P3D ERROR: " +
                                         e.javaClass.simpleName
                                 )
                             }
@@ -228,12 +269,11 @@ class CaptureService : Service() {
                     handler
                 )
 
-            sendStatus("P3C • SEARCHING")
+            sendStatus("P3D • SEARCHING")
 
         } catch (e: Exception) {
-
             sendStatus(
-                "P3C ERROR: ${e.javaClass.simpleName}"
+                "P3D ERROR: ${e.javaClass.simpleName}"
             )
         }
     }
@@ -242,54 +282,18 @@ class CaptureService : Service() {
         bitmap: Bitmap,
         width: Int,
         height: Int
-    ) {
-
-        /*
-         * Geometry จากหน้าเกมที่ทดสอบ
-         *
-         * ศูนย์กลาง column:
-         * ~12%, 31%, 50%, 69%, 88%
-         *
-         * ศูนย์กลาง row:
-         * ~34%, 46%, 58%, 70%, 82%
-         *
-         * ใช้ normalized coordinates
-         * จึงไม่ผูกกับ pixel resolution ตรง ๆ
-         */
-
-        val columnCenters =
-            floatArrayOf(
-                0.12f,
-                0.31f,
-                0.50f,
-                0.69f,
-                0.88f
-            )
-
-        val rowCenters =
-            floatArrayOf(
-                0.34f,
-                0.46f,
-                0.58f,
-                0.70f,
-                0.82f
-            )
+    ): Boolean {
 
         var validCells = 0
 
         for (row in 0 until 5) {
-
             for (column in 0 until 5) {
 
                 val centerX =
-                    (width *
-                        columnCenters[column])
-                        .toInt()
+                    (width * columnCenters[column]).toInt()
 
                 val centerY =
-                    (height *
-                        rowCenters[row])
-                        .toInt()
+                    (height * rowCenters[row]).toInt()
 
                 if (
                     looksLikeCell(
@@ -305,40 +309,205 @@ class CaptureService : Service() {
             }
         }
 
-        /*
-         * ต้องพบอย่างน้อย 23 จาก 25 ช่อง
-         *
-         * ยอมให้คลาดเคลื่อนเล็กน้อยจาก
-         * animation / highlight / overlay
-         */
-
         if (validCells >= 23) {
-
             consecutiveGridFrames++
-
         } else {
-
             consecutiveGridFrames = 0
         }
 
-        /*
-         * ต้องผ่าน 3 analysis ติดต่อกัน
-         * ป้องกัน transition frame
-         * และช่วง countdown 3-2-1
-         */
-
-        if (consecutiveGridFrames >= 3) {
-
+        if (consecutiveGridFrames < 3) {
             sendStatus(
-                "P3C • GRID READY ✓ • $validCells/25"
+                "P3D • SEARCHING • $validCells/25"
             )
-
-        } else {
-
-            sendStatus(
-                "P3C • SEARCHING • $validCells/25"
-            )
+            return false
         }
+
+        return true
+    }
+
+    private fun runOcr(
+        bitmap: Bitmap,
+        width: Int,
+        height: Int
+    ) {
+
+        ocrBusy = true
+
+        val input =
+            InputImage.fromBitmap(bitmap, 0)
+
+        recognizer
+            .process(input)
+            .addOnSuccessListener { result ->
+
+                /*
+                 * number -> Pair(row,column)
+                 *
+                 * row / column ใช้ 1..5
+                 */
+                val board =
+                    mutableMapOf<Int, Pair<Int, Int>>()
+
+                /*
+                 * ป้องกันเลขสองตัวถูก map
+                 * เข้าช่องเดียวกัน
+                 */
+                val occupiedCells =
+                    mutableSetOf<Pair<Int, Int>>()
+
+                for (block in result.textBlocks) {
+                    for (line in block.lines) {
+                        for (element in line.elements) {
+
+                            val raw =
+                                element.text
+                                    .trim()
+                                    .replace(
+                                        Regex("[^0-9]"),
+                                        ""
+                                    )
+
+                            val number =
+                                raw.toIntOrNull()
+                                    ?: continue
+
+                            if (number !in 1..25) {
+                                continue
+                            }
+
+                            val box =
+                                element.boundingBox
+                                    ?: continue
+
+                            val x =
+                                box.exactCenterX()
+
+                            val y =
+                                box.exactCenterY()
+
+                            /*
+                             * หา grid center ที่ใกล้ที่สุด
+                             */
+                            var bestRow = -1
+                            var bestColumn = -1
+                            var bestDx = Float.MAX_VALUE
+                            var bestDy = Float.MAX_VALUE
+
+                            for (row in 0 until 5) {
+
+                                val cy =
+                                    height *
+                                        rowCenters[row]
+
+                                val dy =
+                                    abs(y - cy)
+
+                                if (dy < bestDy) {
+                                    bestDy = dy
+                                    bestRow = row
+                                }
+                            }
+
+                            for (column in 0 until 5) {
+
+                                val cx =
+                                    width *
+                                        columnCenters[column]
+
+                                val dx =
+                                    abs(x - cx)
+
+                                if (dx < bestDx) {
+                                    bestDx = dx
+                                    bestColumn = column
+                                }
+                            }
+
+                            if (
+                                bestRow == -1 ||
+                                bestColumn == -1
+                            ) {
+                                continue
+                            }
+
+                            /*
+                             * ต้องอยู่ใกล้ center ของช่องจริง
+                             * เพื่อไม่เอาเลขจาก timer/header
+                             */
+                            val maxDx =
+                                width * 0.065f
+
+                            val maxDy =
+                                height * 0.045f
+
+                            if (
+                                bestDx > maxDx ||
+                                bestDy > maxDy
+                            ) {
+                                continue
+                            }
+
+                            val cell =
+                                Pair(
+                                    bestRow + 1,
+                                    bestColumn + 1
+                                )
+
+                            if (
+                                number !in board &&
+                                cell !in occupiedCells
+                            ) {
+                                board[number] = cell
+                                occupiedCells.add(cell)
+                            }
+                        }
+                    }
+                }
+
+                /*
+                 * ถ้าครบ ต้องมีเลข 1..25
+                 * ทุกตัว และกินครบ 25 ช่อง
+                 */
+                val complete =
+                    board.size == 25 &&
+                    (1..25).all {
+                        board.containsKey(it)
+                    } &&
+                    occupiedCells.size == 25
+
+                if (complete) {
+
+                    val one = board[1]!!
+                    val two = board[2]!!
+                    val twentyFive =
+                        board[25]!!
+
+                    sendStatus(
+                        "P3D • READ 25/25 ✓\n" +
+                            "1:R${one.first}C${one.second} " +
+                            "2:R${two.first}C${two.second} " +
+                            "25:R${twentyFive.first}C${twentyFive.second}"
+                    )
+
+                } else {
+
+                    sendStatus(
+                        "P3D • OCR ${board.size}/25"
+                    )
+                }
+            }
+            .addOnFailureListener { e ->
+
+                sendStatus(
+                    "P3D OCR ERROR: " +
+                        e.javaClass.simpleName
+                )
+            }
+            .addOnCompleteListener {
+
+                bitmap.recycle()
+                ocrBusy = false
+            }
     }
 
     private fun looksLikeCell(
@@ -348,13 +517,6 @@ class CaptureService : Service() {
         width: Int,
         height: Int
     ): Boolean {
-
-        /*
-         * อย่า sample ตรงกลางเพียงจุดเดียว
-         * เพราะตรงนั้นมีตัวเลขสีเข้ม
-         *
-         * sample รอบ ๆ ตัวเลขแทน
-         */
 
         val dx =
             maxOf(
@@ -380,7 +542,6 @@ class CaptureService : Service() {
 
         var lightSamples = 0
         var neutralSamples = 0
-        var totalSamples = 0
 
         for (offset in offsets) {
 
@@ -408,21 +569,9 @@ class CaptureService : Service() {
             val brightness =
                 (r + g + b) / 3
 
-            /*
-             * ช่องเกมเป็นขาว/เทาอ่อน
-             */
-
             if (brightness >= 185) {
                 lightSamples++
             }
-
-            /*
-             * สีพื้นช่องควรค่อนข้าง neutral
-             * R/G/B ไม่ต่างกันมาก
-             *
-             * ช่วยแยกจาก background
-             * หรือ element สีต่าง ๆ
-             */
 
             val maxChannel =
                 maxOf(r, g, b)
@@ -436,20 +585,11 @@ class CaptureService : Service() {
             ) {
                 neutralSamples++
             }
-
-            totalSamples++
         }
-
-        /*
-         * อย่างน้อย 4/6 จุดต้องสว่าง
-         * และอย่างน้อย 4/6 จุดต้องเป็น
-         * สีขาว/เทาค่อนข้าง neutral
-         */
 
         return (
             lightSamples >= 4 &&
-            neutralSamples >= 4 &&
-            totalSamples == offsets.size
+            neutralSamples >= 4
         )
     }
 
@@ -463,6 +603,7 @@ class CaptureService : Service() {
             )
 
         i.setPackage(packageName)
+
         i.putExtra(
             "status",
             message
@@ -497,6 +638,8 @@ class CaptureService : Service() {
 
         projection?.stop()
         projection = null
+
+        recognizer.close()
 
         super.onDestroy()
     }
