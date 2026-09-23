@@ -18,7 +18,6 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import com.google.mlkit.vision.common.InputImage
@@ -40,20 +39,34 @@ class CaptureService : Service() {
     private var consecutiveGridFrames = 0
 
     private var ocrBusy = false
-    private var lastOcrTime = 0L
+    private var boardLocked = false
 
     /*
-     * ตำแหน่งเลข 1-25 ตอนเริ่มเกม
+     * number -> row,column
      */
     private val savedBoard =
         mutableMapOf<Int, Pair<Int, Int>>()
 
-    private var boardLocked = false
-
     /*
-     * เลขที่เรากำลังชี้ให้ผู้ใช้กด
+     * เป้าหมายปัจจุบัน 1..25
      */
     private var currentTarget = 1
+
+    /*
+     * Fast detector
+     *
+     * เก็บ signature ของช่องเป้าหมาย
+     * แล้วดูว่าภาพในช่องเปลี่ยนมากพอหรือยัง
+     */
+    private var targetSignature: Long? = null
+    private var targetStableFrames = 0
+    private var changeFrames = 0
+
+    /*
+     * หลังเลื่อนไป target ใหม่
+     * เว้น frame สั้น ๆ เพื่อสร้าง baseline ใหม่
+     */
+    private var baselineDelayFrames = 0
 
     private val recognizer =
         TextRecognition.getClient(
@@ -95,8 +108,10 @@ class CaptureService : Service() {
                 NOTIFICATION_SERVICE
             ) as NotificationManager
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-
+        if (
+            Build.VERSION.SDK_INT >=
+            Build.VERSION_CODES.O
+        ) {
             nm.createNotificationChannel(
                 NotificationChannel(
                     channel,
@@ -114,19 +129,21 @@ class CaptureService : Service() {
     ): Int {
 
         val notification =
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-
+            if (
+                Build.VERSION.SDK_INT >=
+                Build.VERSION_CODES.O
+            ) {
                 Notification.Builder(
                     this,
                     channel
                 )
-
             } else {
-
                 Notification.Builder(this)
             }
                 .setContentTitle("Number Finder")
-                .setContentText("Phase 4C smart highlight")
+                .setContentText(
+                    "Phase 4D five-step preview"
+                )
                 .setSmallIcon(
                     android.R.drawable.ic_menu_view
                 )
@@ -147,14 +164,11 @@ class CaptureService : Service() {
 
             val data =
                 if (Build.VERSION.SDK_INT >= 33) {
-
                     intent?.getParcelableExtra(
                         "data",
                         Intent::class.java
                     )
-
                 } else {
-
                     @Suppress("DEPRECATION")
                     intent?.getParcelableExtra<Intent>(
                         "data"
@@ -165,9 +179,9 @@ class CaptureService : Service() {
                 resultCode != Activity.RESULT_OK ||
                 data == null
             ) {
-
-                sendStatus("P4C • ERROR permission")
-
+                sendStatus(
+                    "P4D • ERROR permission"
+                )
                 return START_NOT_STICKY
             }
 
@@ -192,7 +206,8 @@ class CaptureService : Service() {
         } catch (e: Exception) {
 
             sendStatus(
-                "P4C ERROR: ${e.javaClass.simpleName}"
+                "P4D ERROR: " +
+                    e.javaClass.simpleName
             )
         }
 
@@ -206,7 +221,11 @@ class CaptureService : Service() {
             val metrics = DisplayMetrics()
 
             @Suppress("DEPRECATION")
-            (getSystemService(WINDOW_SERVICE) as WindowManager)
+            (
+                getSystemService(
+                    WINDOW_SERVICE
+                ) as WindowManager
+            )
                 .defaultDisplay
                 .getRealMetrics(metrics)
 
@@ -222,35 +241,34 @@ class CaptureService : Service() {
                     2
                 )
 
-            imageReader?.setOnImageAvailableListener(
-                { reader ->
+            imageReader
+                ?.setOnImageAvailableListener(
+                    { reader ->
 
-                    val image =
-                        try {
-                            reader.acquireLatestImage()
-                        } catch (_: Exception) {
-                            null
-                        }
+                        val image =
+                            try {
+                                reader.acquireLatestImage()
+                            } catch (_: Exception) {
+                                null
+                            }
 
-                    if (image != null) {
+                        if (image != null) {
 
-                        frameCount++
-
-                        /*
-                         * วิเคราะห์ถี่กว่าเดิมเล็กน้อย
-                         * เพื่อให้ hint ย้ายเร็วขึ้น
-                         */
-                        if (
-                            frameCount == 1L ||
-                            frameCount % 6L == 0L
-                        ) {
+                            frameCount++
 
                             try {
 
-                                val plane = image.planes[0]
-                                val buffer = plane.buffer
-                                val pixelStride = plane.pixelStride
-                                val rowStride = plane.rowStride
+                                val plane =
+                                    image.planes[0]
+
+                                val buffer =
+                                    plane.buffer
+
+                                val pixelStride =
+                                    plane.pixelStride
+
+                                val rowStride =
+                                    plane.rowStride
 
                                 val rowPadding =
                                     rowStride -
@@ -258,7 +276,8 @@ class CaptureService : Service() {
 
                                 val bitmapWidth =
                                     width +
-                                        rowPadding / pixelStride
+                                        rowPadding /
+                                        pixelStride
 
                                 val bitmap =
                                     Bitmap.createBitmap(
@@ -267,36 +286,57 @@ class CaptureService : Service() {
                                         Bitmap.Config.ARGB_8888
                                     )
 
-                                bitmap.copyPixelsFromBuffer(buffer)
+                                bitmap.copyPixelsFromBuffer(
+                                    buffer
+                                )
 
-                                val gridReady =
-                                    analyzeGrid(
+                                /*
+                                 * ก่อนล็อก board:
+                                 * ใช้ detector + OCR
+                                 *
+                                 * หลังล็อก:
+                                 * ทุก frame ใช้ fast detector
+                                 */
+                                if (!boardLocked) {
+
+                                    if (
+                                        frameCount == 1L ||
+                                        frameCount % 6L == 0L
+                                    ) {
+
+                                        val ready =
+                                            analyzeGrid(
+                                                bitmap,
+                                                width,
+                                                height
+                                            )
+
+                                        if (
+                                            ready &&
+                                            !ocrBusy
+                                        ) {
+
+                                            val copy =
+                                                Bitmap.createBitmap(
+                                                    bitmap,
+                                                    0,
+                                                    0,
+                                                    width,
+                                                    height
+                                                )
+
+                                            readInitialBoard(
+                                                copy,
+                                                width,
+                                                height
+                                            )
+                                        }
+                                    }
+
+                                } else {
+
+                                    analyzeCurrentTargetFast(
                                         bitmap,
-                                        width,
-                                        height
-                                    )
-
-                                if (
-                                    gridReady &&
-                                    !ocrBusy &&
-                                    SystemClock.elapsedRealtime() -
-                                        lastOcrTime >= 220
-                                ) {
-
-                                    lastOcrTime =
-                                        SystemClock.elapsedRealtime()
-
-                                    val copy =
-                                        Bitmap.createBitmap(
-                                            bitmap,
-                                            0,
-                                            0,
-                                            width,
-                                            height
-                                        )
-
-                                    runOcr(
-                                        copy,
                                         width,
                                         height
                                     )
@@ -307,17 +347,16 @@ class CaptureService : Service() {
                             } catch (e: Exception) {
 
                                 sendStatus(
-                                    "P4C ERROR: " +
+                                    "P4D ERROR: " +
                                         e.javaClass.simpleName
                                 )
                             }
-                        }
 
-                        image.close()
-                    }
-                },
-                handler
-            )
+                            image.close()
+                        }
+                    },
+                    handler
+                )
 
             virtualDisplay =
                 projection?.createVirtualDisplay(
@@ -332,14 +371,482 @@ class CaptureService : Service() {
                     handler
                 )
 
-            sendStatus("P4C • SEARCHING")
+            sendStatus(
+                "P4D • SEARCHING"
+            )
 
         } catch (e: Exception) {
 
             sendStatus(
-                "P4C ERROR: ${e.javaClass.simpleName}"
+                "P4D ERROR: " +
+                    e.javaClass.simpleName
             )
         }
+    }
+
+    private fun readInitialBoard(
+        bitmap: Bitmap,
+        width: Int,
+        height: Int
+    ) {
+
+        ocrBusy = true
+
+        recognizer
+            .process(
+                InputImage.fromBitmap(
+                    bitmap,
+                    0
+                )
+            )
+            .addOnSuccessListener { result ->
+
+                val board =
+                    readBoard(
+                        result,
+                        width,
+                        height
+                    )
+
+                val complete =
+                    board.size == 25 &&
+                        (1..25).all {
+                            board.containsKey(it)
+                        }
+
+                if (complete) {
+
+                    savedBoard.clear()
+                    savedBoard.putAll(board)
+
+                    currentTarget = 1
+                    boardLocked = true
+
+                    targetSignature = null
+                    targetStableFrames = 0
+                    changeFrames = 0
+                    baselineDelayFrames = 2
+
+                    sendPreview(
+                        width,
+                        height
+                    )
+
+                } else {
+
+                    sendStatus(
+                        "P4D • BOARD " +
+                            "${board.size}/25"
+                    )
+                }
+            }
+            .addOnFailureListener { e ->
+
+                sendStatus(
+                    "P4D OCR ERROR: " +
+                        e.javaClass.simpleName
+                )
+            }
+            .addOnCompleteListener {
+
+                bitmap.recycle()
+                ocrBusy = false
+            }
+    }
+
+    /*
+     * FAST PATH
+     *
+     * ไม่มี ML Kit ตรงนี้
+     *
+     * ดู pixel pattern รอบตัวเลขของ
+     * currentTarget ทุก captured frame
+     */
+    private fun analyzeCurrentTargetFast(
+        bitmap: Bitmap,
+        width: Int,
+        height: Int
+    ) {
+
+        if (currentTarget !in 1..25) {
+            return
+        }
+
+        val cell =
+            savedBoard[currentTarget]
+                ?: return
+
+        val cx =
+            (
+                width *
+                    columnCenters[
+                        cell.second - 1
+                    ]
+            ).toInt()
+
+        val cy =
+            (
+                height *
+                    rowCenters[
+                        cell.first - 1
+                    ]
+            ).toInt()
+
+        val signature =
+            cellSignature(
+                bitmap,
+                cx,
+                cy,
+                width,
+                height
+            )
+
+        /*
+         * หลังเปลี่ยน target
+         * รอเล็กน้อยก่อนสร้าง baseline
+         */
+        if (baselineDelayFrames > 0) {
+
+            baselineDelayFrames--
+
+            if (baselineDelayFrames == 0) {
+                targetSignature = signature
+                targetStableFrames = 1
+            }
+
+            return
+        }
+
+        val baseline =
+            targetSignature
+
+        if (baseline == null) {
+
+            targetSignature = signature
+            targetStableFrames = 1
+
+            return
+        }
+
+        val difference =
+            signatureDifference(
+                baseline,
+                signature
+            )
+
+        /*
+         * ถ้าภาพยังเหมือนเดิม
+         * ค่อย ๆ update baseline
+         */
+        if (difference < 18) {
+
+            changeFrames = 0
+
+            if (targetStableFrames < 8) {
+                targetStableFrames++
+            }
+
+            if (targetStableFrames <= 4) {
+                targetSignature = signature
+            }
+
+            return
+        }
+
+        /*
+         * ต้องเห็นการเปลี่ยน 2 frame
+         * ติดต่อกัน ป้องกัน animation/noise
+         */
+        changeFrames++
+
+        if (
+            changeFrames >= 2 &&
+            targetStableFrames >= 1
+        ) {
+
+            advanceTarget(
+                width,
+                height
+            )
+        }
+    }
+
+    private fun advanceTarget(
+        width: Int,
+        height: Int
+    ) {
+
+        currentTarget++
+
+        targetSignature = null
+        targetStableFrames = 0
+        changeFrames = 0
+
+        baselineDelayFrames = 2
+
+        if (currentTarget <= 25) {
+
+            sendPreview(
+                width,
+                height
+            )
+
+        } else {
+
+            sendClearPreview(
+                "P4D • 1-25 COMPLETE ✓"
+            )
+        }
+    }
+
+    /*
+     * สร้าง signature 5x5 จุด
+     * รอบบริเวณตัวเลข
+     *
+     * pack brightness เป็น 4-bit ต่อ sample
+     * ใช้ 16 samplesหลักสำหรับ Long
+     */
+    private fun cellSignature(
+        bitmap: Bitmap,
+        centerX: Int,
+        centerY: Int,
+        width: Int,
+        height: Int
+    ): Long {
+
+        val stepX =
+            maxOf(
+                5,
+                (width * 0.012f).toInt()
+            )
+
+        val stepY =
+            maxOf(
+                5,
+                (height * 0.008f).toInt()
+            )
+
+        val offsets =
+            arrayOf(
+                intArrayOf(-2, -2),
+                intArrayOf(-1, -2),
+                intArrayOf(0, -2),
+                intArrayOf(1, -2),
+
+                intArrayOf(-2, -1),
+                intArrayOf(-1, -1),
+                intArrayOf(0, -1),
+                intArrayOf(1, -1),
+
+                intArrayOf(-2, 0),
+                intArrayOf(-1, 0),
+                intArrayOf(0, 0),
+                intArrayOf(1, 0),
+
+                intArrayOf(-2, 1),
+                intArrayOf(-1, 1),
+                intArrayOf(0, 1),
+                intArrayOf(1, 1)
+            )
+
+        var signature = 0L
+
+        for (
+            index in offsets.indices
+        ) {
+
+            val offset =
+                offsets[index]
+
+            val x =
+                (
+                    centerX +
+                        offset[0] *
+                        stepX
+                ).coerceIn(
+                    0,
+                    bitmap.width - 1
+                )
+
+            val y =
+                (
+                    centerY +
+                        offset[1] *
+                        stepY
+                ).coerceIn(
+                    0,
+                    bitmap.height - 1
+                )
+
+            val color =
+                bitmap.getPixel(
+                    x,
+                    y
+                )
+
+            val brightness =
+                (
+                    Color.red(color) +
+                        Color.green(color) +
+                        Color.blue(color)
+                    ) / 3
+
+            /*
+             * 0..255 -> 0..15
+             */
+            val level =
+                (brightness / 16)
+                    .coerceIn(
+                        0,
+                        15
+                    )
+
+            signature =
+                signature or
+                    (
+                        level.toLong() shl
+                            (index * 4)
+                    )
+        }
+
+        return signature
+    }
+
+    private fun signatureDifference(
+        a: Long,
+        b: Long
+    ): Int {
+
+        var difference = 0
+
+        for (i in 0 until 16) {
+
+            val shift =
+                i * 4
+
+            val va =
+                (
+                    (a shr shift) and 0xF
+                ).toInt()
+
+            val vb =
+                (
+                    (b shr shift) and 0xF
+                ).toInt()
+
+            difference +=
+                abs(va - vb)
+        }
+
+        return difference
+    }
+
+    /*
+     * ส่งตำแหน่งล่วงหน้าสูงสุด 5 ตัว
+     */
+    private fun sendPreview(
+        width: Int,
+        height: Int
+    ) {
+
+        val intent =
+            Intent(
+                "NUMBER_FINDER_STATUS"
+            )
+
+        intent.setPackage(
+            packageName
+        )
+
+        intent.putExtra(
+            "status",
+            "P4D • NEXT $currentTarget"
+        )
+
+        var slot = 0
+
+        for (
+            number in
+            currentTarget..
+                minOf(
+                    25,
+                    currentTarget + 4
+                )
+        ) {
+
+            val cell =
+                savedBoard[number]
+                    ?: continue
+
+            val x =
+                (
+                    width *
+                        columnCenters[
+                            cell.second - 1
+                        ]
+                ).toInt()
+
+            val y =
+                (
+                    height *
+                        rowCenters[
+                            cell.first - 1
+                        ]
+                ).toInt()
+
+            intent.putExtra(
+                "preview_${slot}_x",
+                x
+            )
+
+            intent.putExtra(
+                "preview_${slot}_y",
+                y
+            )
+
+            /*
+             * แสดงเลขจริงที่ต้องกด
+             */
+            intent.putExtra(
+                "preview_${slot}_number",
+                number
+            )
+
+            slot++
+        }
+
+        intent.putExtra(
+            "preview_count",
+            slot
+        )
+
+        sendBroadcast(intent)
+    }
+
+    private fun sendClearPreview(
+        message: String
+    ) {
+
+        val intent =
+            Intent(
+                "NUMBER_FINDER_STATUS"
+            )
+
+        intent.setPackage(
+            packageName
+        )
+
+        intent.putExtra(
+            "status",
+            message
+        )
+
+        intent.putExtra(
+            "preview_count",
+            0
+        )
+
+        sendBroadcast(intent)
     }
 
     private fun analyzeGrid(
@@ -386,10 +893,13 @@ class CaptureService : Service() {
             consecutiveGridFrames = 0
         }
 
-        if (consecutiveGridFrames < 3) {
+        if (
+            consecutiveGridFrames < 3
+        ) {
 
             sendStatus(
-                "P4C • SEARCHING • $validCells/25"
+                "P4D • SEARCHING • " +
+                    "$validCells/25"
             )
 
             return false
@@ -398,216 +908,48 @@ class CaptureService : Service() {
         return true
     }
 
-    private fun runOcr(
-        bitmap: Bitmap,
+    private fun readBoard(
+        result:
+            com.google.mlkit.vision.text.Text,
         width: Int,
         height: Int
-    ) {
-
-        ocrBusy = true
-
-        val input =
-            InputImage.fromBitmap(
-                bitmap,
-                0
-            )
-
-        recognizer
-            .process(input)
-            .addOnSuccessListener { result ->
-
-                /*
-                 * ครั้งแรก:
-                 * ต้องอ่าน 1-25 ครบก่อน
-                 * แล้วล็อกตำแหน่งไว้
-                 */
-                if (!boardLocked) {
-
-                    val board =
-                        readGridNumbers(
-                            result,
-                            width,
-                            height,
-                            1,
-                            25
-                        )
-
-                    val complete =
-                        board.size == 25 &&
-                            (1..25).all {
-                                board.containsKey(it)
-                            }
-
-                    if (!complete) {
-
-                        sendStatus(
-                            "P4C • BOARD ${board.size}/25"
-                        )
-
-                        return@addOnSuccessListener
-                    }
-
-                    savedBoard.clear()
-                    savedBoard.putAll(board)
-
-                    boardLocked = true
-                    currentTarget = 1
-
-                    highlightTarget(
-                        width,
-                        height
-                    )
-
-                    return@addOnSuccessListener
-                }
-
-                /*
-                 * หลังล็อก board แล้ว
-                 *
-                 * ถ้ากดเลข N สำเร็จ
-                 * ช่องเดิมจะเปลี่ยนเป็น N+25
-                 *
-                 * 1 -> 26
-                 * 2 -> 27
-                 * ...
-                 * 25 -> 50
-                 */
-                if (currentTarget in 1..25) {
-
-                    val replacement =
-                        currentTarget + 25
-
-                    val expectedCell =
-                        savedBoard[currentTarget]
-
-                    if (expectedCell != null) {
-
-                        val replacementCell =
-                            findNumberCell(
-                                result,
-                                width,
-                                height,
-                                replacement
-                            )
-
-                        /*
-                         * ต้องเห็นเลข replacement
-                         * อยู่ช่องเดิมจริง
-                         */
-                        if (
-                            replacementCell != null &&
-                            replacementCell == expectedCell
-                        ) {
-
-                            currentTarget++
-
-                            if (currentTarget <= 25) {
-
-                                highlightTarget(
-                                    width,
-                                    height
-                                )
-
-                            } else {
-
-                                sendStatus(
-                                    "P4C • COMPLETE ✓"
-                                )
-                            }
-
-                            return@addOnSuccessListener
-                        }
-                    }
-
-                    /*
-                     * ยังไม่เห็น N+25
-                     * ให้คง Highlight ตัวเดิม
-                     */
-                    highlightTarget(
-                        width,
-                        height
-                    )
-                }
-            }
-            .addOnFailureListener { e ->
-
-                sendStatus(
-                    "P4C OCR ERROR: " +
-                        e.javaClass.simpleName
-                )
-            }
-            .addOnCompleteListener {
-
-                bitmap.recycle()
-                ocrBusy = false
-            }
-    }
-
-    private fun highlightTarget(
-        width: Int,
-        height: Int
-    ) {
-
-        if (currentTarget !in 1..25) {
-            return
-        }
-
-        val cell =
-            savedBoard[currentTarget]
-                ?: return
-
-        val x =
-            (
-                width *
-                    columnCenters[
-                        cell.second - 1
-                    ]
-            ).toInt()
-
-        val y =
-            (
-                height *
-                    rowCenters[
-                        cell.first - 1
-                    ]
-            ).toInt()
-
-        sendHighlight(
-            "NEXT $currentTarget • " +
-                "R${cell.first}C${cell.second}",
-            x,
-            y
-        )
-    }
-
-    private fun readGridNumbers(
-        result: com.google.mlkit.vision.text.Text,
-        width: Int,
-        height: Int,
-        minNumber: Int,
-        maxNumber: Int
     ): Map<Int, Pair<Int, Int>> {
 
-        val numbers =
-            mutableMapOf<Int, Pair<Int, Int>>()
+        val board =
+            mutableMapOf<
+                Int,
+                Pair<Int, Int>
+            >()
 
         val occupied =
-            mutableSetOf<Pair<Int, Int>>()
+            mutableSetOf<
+                Pair<Int, Int>
+            >()
 
-        for (block in result.textBlocks) {
+        for (
+            block in result.textBlocks
+        ) {
 
             for (line in block.lines) {
 
-                for (element in line.elements) {
+                for (
+                    element in line.elements
+                ) {
+
+                    val raw =
+                        element.text
+                            .trim()
+                            .replace(
+                                Regex("[^0-9]"),
+                                ""
+                            )
 
                     val number =
-                        cleanNumber(
-                            element.text
-                        ) ?: continue
+                        raw.toIntOrNull()
+                            ?: continue
 
                     if (
-                        number !in
-                        minNumber..maxNumber
+                        number !in 1..25
                     ) {
                         continue
                     }
@@ -625,81 +967,22 @@ class CaptureService : Service() {
                         ) ?: continue
 
                     if (
-                        number !in numbers &&
+                        number !in board &&
                         cell !in occupied
                     ) {
 
-                        numbers[number] =
+                        board[number] =
                             cell
 
-                        occupied.add(cell)
-                    }
-                }
-            }
-        }
-
-        return numbers
-    }
-
-    private fun findNumberCell(
-        result: com.google.mlkit.vision.text.Text,
-        width: Int,
-        height: Int,
-        wantedNumber: Int
-    ): Pair<Int, Int>? {
-
-        for (block in result.textBlocks) {
-
-            for (line in block.lines) {
-
-                for (element in line.elements) {
-
-                    val number =
-                        cleanNumber(
-                            element.text
-                        ) ?: continue
-
-                    if (
-                        number != wantedNumber
-                    ) {
-                        continue
-                    }
-
-                    val box =
-                        element.boundingBox
-                            ?: continue
-
-                    val cell =
-                        nearestCell(
-                            box.exactCenterX(),
-                            box.exactCenterY(),
-                            width,
-                            height
+                        occupied.add(
+                            cell
                         )
-
-                    if (cell != null) {
-                        return cell
                     }
                 }
             }
         }
 
-        return null
-    }
-
-    private fun cleanNumber(
-        text: String
-    ): Int? {
-
-        val raw =
-            text
-                .trim()
-                .replace(
-                    Regex("[^0-9]"),
-                    ""
-                )
-
-        return raw.toIntOrNull()
+        return board
     }
 
     private fun nearestCell(
@@ -808,21 +1091,28 @@ class CaptureService : Service() {
         for (offset in offsets) {
 
             val x =
-                (centerX + offset[0])
-                    .coerceIn(
-                        0,
-                        bitmap.width - 1
-                    )
+                (
+                    centerX +
+                        offset[0]
+                ).coerceIn(
+                    0,
+                    bitmap.width - 1
+                )
 
             val y =
-                (centerY + offset[1])
-                    .coerceIn(
-                        0,
-                        bitmap.height - 1
-                    )
+                (
+                    centerY +
+                        offset[1]
+                ).coerceIn(
+                    0,
+                    bitmap.height - 1
+                )
 
             val color =
-                bitmap.getPixel(x, y)
+                bitmap.getPixel(
+                    x,
+                    y
+                )
 
             val r =
                 Color.red(color)
@@ -836,7 +1126,9 @@ class CaptureService : Service() {
             val brightness =
                 (r + g + b) / 3
 
-            if (brightness >= 185) {
+            if (
+                brightness >= 185
+            ) {
                 lightSamples++
             }
 
@@ -876,39 +1168,6 @@ class CaptureService : Service() {
         intent.putExtra(
             "status",
             message
-        )
-
-        sendBroadcast(intent)
-    }
-
-    private fun sendHighlight(
-        message: String,
-        x: Int,
-        y: Int
-    ) {
-
-        val intent =
-            Intent(
-                "NUMBER_FINDER_STATUS"
-            )
-
-        intent.setPackage(
-            packageName
-        )
-
-        intent.putExtra(
-            "status",
-            message
-        )
-
-        intent.putExtra(
-            "highlight_x",
-            x
-        )
-
-        intent.putExtra(
-            "highlight_y",
-            y
         )
 
         sendBroadcast(intent)
